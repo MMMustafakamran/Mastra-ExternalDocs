@@ -1,0 +1,33 @@
+{
+  "name": "autorecorder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "record": "tsx cli.ts",
+    "record:list": "tsx cli.ts --list",
+    "doctor": "node ../ci/write-versions.mjs && tsx cli.ts --doctor",
+    "doctor:online": "node ../ci/write-versions.mjs && tsx cli.ts --doctor --online",
+    "typecheck": "tsc --noEmit",
+    "capture": "tsx cli-capture.ts",
+    "capture:list": "tsx cli-capture.ts --list",
+    "render": "tsx cli-render.ts",
+    "render:list": "tsx cli-render.ts --list",
+    "test": "node --import tsx --test test/*.test.ts",
+    "core:check": "node scripts/core-manifest.mjs --check",
+    "core:write": "node scripts/core-manifest.mjs --write",
+    "check": "npm run typecheck && npm test && npm run core:check",
+    "cli:videos": "tsx cli-render.ts --all --demos"
+  },
+  "dependencies": {
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "playwright": "^1.51.0",
+    "shiki": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26",
+    "tsx": "^4.19.3",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,947 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { createHighlighter, type Highlighter } from 'shiki';
+
+export interface IdeTabConfig {
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  tabLabel?: string;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
+ * Per-line syntax tokens from Shiki's real TextMate grammars.
+ *
+ * This replaced a hand-rolled regex highlighter. That version ran its keyword,
+ * prop and number passes over markup it had already emitted, so a rule would
+ * rewrite the `style` attribute of a span produced by an earlier rule --
+ * `<span <span style="...">style</span>="color:...">` -- leaking raw CSS into
+ * the rendered code pane on 642 lines across 16 of the 17 configured pages.
+ *
+ * Tokenizing first and escaping only token *content* makes that class of bug
+ * structurally impossible: no pattern ever sees generated HTML.
+ */
+const SHIKI_THEME = 'dark-plus';
+
+/** Grammars preloaded once; must cover every extension langFor() can return. */
+const SHIKI_LANGS = ['tsx', 'typescript', 'javascript', 'json', 'python', 'markdown'] as const;
+
+let highlighterPromise: Promise<Highlighter> | null = null;
+
+function getHighlighter(): Promise<Highlighter> {
+  highlighterPromise ??= createHighlighter({
+    themes: [SHIKI_THEME],
+    langs: [...SHIKI_LANGS],
+  });
+  return highlighterPromise;
+}
+
+function langFor(ext: string): (typeof SHIKI_LANGS)[number] | null {
+  if (ext === 'tsx' || ext === 'jsx') return 'tsx';
+  if (ext === 'ts') return 'typescript';
+  if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'javascript';
+  if (ext === 'json') return 'json';
+  if (ext === 'py') return 'python';
+  if (ext === 'md') return 'markdown';
+  return null;
+}
+
+/** Shiki's fontStyle is a bitmask: 1 italic, 2 bold, 4 underline. */
+function fontStyleCss(fontStyle: number | undefined): string {
+  if (!fontStyle) return '';
+  let css = '';
+  if (fontStyle & 1) css += 'font-style:italic;';
+  if (fontStyle & 2) css += 'font-weight:bold;';
+  if (fontStyle & 4) css += 'text-decoration:underline;';
+  return css;
+}
+
+/**
+ * @returns One HTML string per source line, already escaped and safe to embed.
+ *   Falls back to plain escaped text when the language has no grammar, so an
+ *   unknown extension renders readable code rather than nothing.
+ */
+async function highlightLines(code: string, ext: string): Promise<string[]> {
+  const rawLines = code.split('\n');
+  const plain = (): string[] =>
+    rawLines.map((l) => (l.trim() ? escapeHtml(l) : '&nbsp;'));
+
+  const lang = langFor(ext);
+  if (!lang) return plain();
+
+  try {
+    const highlighter = await getHighlighter();
+    const { tokens } = highlighter.codeToTokens(code, {
+      lang,
+      theme: SHIKI_THEME,
+    });
+
+    return rawLines.map((raw, idx) => {
+      if (!raw.trim()) return '&nbsp;';
+      const lineTokens = tokens[idx];
+      if (!lineTokens) return escapeHtml(raw);
+
+      return lineTokens
+        .map(
+          (t) =>
+            `<span style="color:${t.color ?? '#d4d4d4'};${fontStyleCss(
+              t.fontStyle,
+            )}">${escapeHtml(t.content)}</span>`,
+        )
+        .join('');
+    });
+  } catch {
+    // Never let a highlighting failure blank out the IDE pane.
+    return plain();
+  }
+}
+
+function getFileIcon(ext: string): string {
+  const isTsx = ext === 'tsx' || ext === 'ts' || ext === 'js' || ext === 'jsx';
+  const isPython = ext === 'py';
+  const isJson = ext === 'json';
+  const isMd = ext === 'md';
+
+  if (isPython) {
+    return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M11.9 2c-4.4 0-4.1 1.9-4.1 1.9l.01 2h4.2v.6H5.8S2 6.1 2 10.6s3.3 4.3 3.3 4.3h2v-2.8s-.1-3.3 3.3-3.3h5.7s3.2.1 3.2-3.1-3.2-3.7-7.6-3.7z" fill="#3776ab"/><path d="M12.1 22c4.4 0 4.1-1.9 4.1-1.9l-.01-2h-4.2v-.6h6.2s3.8.4 3.8-4.1-3.3-4.3-3.3-4.3h-2v2.8s.1 3.3-3.3 3.3H7.7s-3.2-.1-3.2 3.1 3.2 3.7 7.6 3.7z" fill="#ffd43b"/><circle cx="9.5" cy="4.5" r=".7" fill="#fff"/><circle cx="14.5" cy="19.5" r=".7" fill="#fff"/></svg>`;
+  }
+  if (isTsx) {
+    return `<svg width="15" height="15" viewBox="0 0 24 24" fill="#3178c6"><rect width="24" height="24" rx="3"/><text x="4" y="17" fill="#fff" font-family="Segoe UI, sans-serif" font-size="12" font-weight="bold">TS</text></svg>`;
+  }
+  if (isJson) {
+    return `<svg width="15" height="15" viewBox="0 0 24 24" fill="#cbcb41"><text x="3" y="17" fill="#cbcb41" font-family="Consolas, monospace" font-size="14" font-weight="bold">{ }</text></svg>`;
+  }
+  if (isMd) {
+    return `<svg width="15" height="15" viewBox="0 0 24 24" fill="#42a5f5"><rect width="24" height="24" rx="2" fill="none" stroke="#42a5f5" stroke-width="2"/><path d="M4 16V8l4 4 4-4v8M17 8v8m-3-3l3 3 3-3" fill="none" stroke="#42a5f5" stroke-width="2"/></svg>`;
+  }
+  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="#858585"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z" fill="#90a4ae"/></svg>`;
+}
+
+function getLangLabel(ext: string): string {
+  if (ext === 'py') return 'Python 3.12';
+  if (ext === 'tsx' || ext === 'ts' || ext === 'jsx' || ext === 'js')
+    return 'TypeScript JSX';
+  if (ext === 'json') return 'JSON';
+  if (ext === 'md') return 'Markdown';
+  return 'Plain Text';
+}
+
+export async function generateIdeHtml(
+  rootDir: string,
+  primaryFilePath: string,
+  startLine = 1,
+  endLine = 30,
+  extraTabs: IdeTabConfig[] = [],
+  activeTabIdx = 0,
+): Promise<string> {
+  const tabsList: IdeTabConfig[] = [
+    { filePath: primaryFilePath, startLine, endLine },
+    ...extraTabs,
+  ];
+
+  // Read and tokenize every tab up front; the render below stays synchronous.
+  const tabSources = await Promise.all(
+    tabsList.map(async (tab) => {
+      const fullPath = join(rootDir, tab.filePath);
+      const raw = existsSync(fullPath)
+        ? readFileSync(fullPath, 'utf-8')
+        : '// File not found';
+      // Normalize CRLF so a stray \r never lands inside a rendered code line.
+      const code = raw.replace(/\r\n/g, '\n');
+      const ext = basename(tab.filePath).split('.').pop() ?? '';
+      return { code, ext, lines: await highlightLines(code, ext) };
+    }),
+  );
+
+  // Render tab headers
+  const tabHeadersHtml = tabsList
+    .map((tab, idx) => {
+      const fileName = basename(tab.filePath);
+      const ext = fileName.split('.').pop() ?? '';
+      const icon = getFileIcon(ext);
+      const isActive = idx === activeTabIdx;
+
+      return `
+        <div
+          id="ide-tab-${idx}"
+          class="tab ${isActive ? 'active' : ''}"
+          onclick="window.switchIdeTab(${idx})"
+          style="${
+            isActive
+              ? 'background:#1e1e1e;border-top:1px solid #007acc;color:#ffffff;'
+              : 'background:#181818;border-top:1px solid transparent;color:#9d9d9d;'
+          }"
+        >
+          <span class="file-icon">${icon}</span>
+          <span>${escapeHtml(fileName)}</span>
+          <span class="close-btn">&#x2715;</span>
+        </div>
+      `;
+    })
+    .join('');
+
+  // Render file viewports for all tabs
+  const tabBodiesHtml = tabsList
+    .map((tab, idx) => {
+      const { code, ext, lines: highlightedLines } = tabSources[idx];
+
+      const fileName = basename(tab.filePath);
+      const normalizedPath = tab.filePath.replace(/\\/g, '/');
+      const pathParts = normalizedPath.split('/');
+      const codeLines = code.split('\n');
+
+      const linesHtml = codeLines
+        .map((line, lIdx) => {
+          const lineNum = lIdx + 1;
+          const isHighlighted =
+            lineNum >= tab.startLine && lineNum <= tab.endLine;
+          const isCaretLine = lineNum === tab.startLine;
+          const highlightedContent = highlightedLines[lIdx] ?? '&nbsp;';
+
+          const lineClass = isHighlighted
+            ? 'code-line highlighted'
+            : 'code-line';
+          const numClass = isHighlighted ? 'line-num highlighted' : 'line-num';
+          const textClass = isHighlighted
+            ? 'line-content highlighted'
+            : 'line-content';
+
+          const caretHtml = isCaretLine ? '<span class="vs-caret"></span>' : '';
+
+          return `
+            <div class="${lineClass}">
+              <div class="${numClass}">${lineNum}</div>
+              <div class="${textClass}"><span>${highlightedContent}${caretHtml}</span></div>
+            </div>
+          `;
+        })
+        .join('');
+
+      const minimapHtml = codeLines
+        .slice(0, 100)
+        .map((line, lIdx) => {
+          const lineNum = lIdx + 1;
+          const isHighlighted =
+            lineNum >= tab.startLine && lineNum <= tab.endLine;
+          const width = Math.min(
+            Math.max((line.trim().length / 60) * 100, 10),
+            90,
+          );
+          return `<div class="minimap-line ${
+            isHighlighted ? 'active' : ''
+          }" style="width:${width}%;"></div>`;
+        })
+        .join('');
+
+      const breadcrumbsHtml = pathParts
+        .map((part, pIdx) => {
+          const isLast = pIdx === pathParts.length - 1;
+          return `
+            <span class="breadcrumb-item ${isLast ? 'active' : ''}">
+              ${
+                isLast
+                  ? getFileIcon(ext)
+                  : '<span style="color:#dcb67a;font-size:11px;">📁</span>'
+              }
+              <span>${escapeHtml(part)}</span>
+            </span>
+            ${!isLast ? '<span class="breadcrumb-sep">&gt;</span>' : ''}
+          `;
+        })
+        .join('');
+
+      const isDisplayed = idx === activeTabIdx;
+
+      return `
+        <div id="ide-view-${idx}" class="editor-body-view" style="display:${
+        isDisplayed ? 'flex' : 'none'
+      };flex-direction:column;flex:1;overflow:hidden;">
+          <div class="breadcrumbs-bar">
+            ${breadcrumbsHtml}
+          </div>
+          <div class="editor-body">
+            <div class="code-viewport">
+              ${linesHtml}
+            </div>
+            <div class="minimap">
+              ${minimapHtml}
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  // Build tree nodes for primary file + extra tabs
+  const primaryParts = primaryFilePath.replace(/\\/g, '/').split('/');
+  const treeNodes: string[] = [];
+
+  for (let i = 0; i < primaryParts.length; i++) {
+    const isFile = i === primaryParts.length - 1;
+    const part = primaryParts[i];
+    const indentClass = i === 0 ? '' : `pl-${Math.min(i, 4)}`;
+
+    if (isFile) {
+      const ext = part.split('.').pop() ?? '';
+      treeNodes.push(`
+        <div class="tree-node ${indentClass} file-node active-file" data-tab-idx="0" onclick="window.switchIdeTab(0)">
+          <span class="file-icon">${getFileIcon(ext)}</span>
+          <span class="file-label">${escapeHtml(part)}</span>
+        </div>
+      `);
+    } else {
+      treeNodes.push(`
+        <div class="tree-node ${indentClass} folder-node">
+          <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#858585" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+          <span class="folder-icon">📁</span>
+          <span class="folder-name">${escapeHtml(part)}</span>
+        </div>
+      `);
+    }
+  }
+
+  // Extra files in tree
+  extraTabs.forEach((extra, eIdx) => {
+    const eParts = extra.filePath.replace(/\\/g, '/').split('/');
+    const eName = eParts[eParts.length - 1];
+    const eExt = eName.split('.').pop() ?? '';
+    const eIndent = `pl-${Math.min(eParts.length - 1, 4)}`;
+
+    treeNodes.push(`
+      <div class="tree-node ${eIndent} file-node" data-tab-idx="${eIdx + 1}" onclick="window.switchIdeTab(${eIdx + 1})">
+        <span class="file-icon">${getFileIcon(eExt)}</span>
+        <span class="file-label">${escapeHtml(eName)}</span>
+      </div>
+    `);
+  });
+
+  const primaryExt = basename(primaryFilePath).split('.').pop() ?? '';
+  const primaryLang = getLangLabel(primaryExt);
+  const projectName = basename(rootDir) || 'workspace';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${escapeHtml(projectName)} - Visual Studio Code</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body, html {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background-color: #1e1e1e;
+      color: #cccccc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .vscode-container {
+      display: flex;
+      flex-direction: column;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      animation: win11Open 0.22s cubic-bezier(0.1, 0.9, 0.2, 1);
+    }
+    @keyframes win11Open {
+      0% {
+        opacity: 0.85;
+        transform: scale(0.99) translateY(8px);
+      }
+      100% {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+      }
+    }
+    /* Titlebar */
+    .titlebar {
+      height: 35px;
+      background: #181818;
+      border-bottom: 1px solid #2b2b2b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      font-size: 12px;
+      color: #9d9d9d;
+    }
+    .titlebar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .menubar {
+      display: flex;
+      gap: 10px;
+      font-size: 12px;
+      color: #cccccc;
+    }
+    .menubar span {
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+    .menubar span:hover {
+      background: #2a2d2e;
+    }
+    /* Command Palette Search Box */
+    .titlebar-center {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 440px;
+      height: 24px;
+      background: #2a2a2a;
+      border: 1px solid #3c3c3c;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      font-size: 11px;
+      color: #cccccc;
+      cursor: pointer;
+    }
+    .titlebar-center .search-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .titlebar-center .keybadge {
+      background: #383838;
+      border: 1px solid #4a4a4a;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 10px;
+      color: #858585;
+    }
+    .titlebar-controls {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      color: #858585;
+      font-size: 13px;
+    }
+    /* Main Layout */
+    .main-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+    /* Activity Bar */
+    .activity-bar {
+      width: 48px;
+      background: #181818;
+      border-right: 1px solid #2b2b2b;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      color: #858585;
+    }
+    .activity-group {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      align-items: center;
+    }
+    .activity-icon {
+      width: 42px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      cursor: pointer;
+    }
+    .activity-icon.active {
+      color: #ffffff;
+    }
+    .activity-icon.active::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 6px;
+      bottom: 6px;
+      width: 2px;
+      background: #007acc;
+    }
+    .badge {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      background: #007acc;
+      color: #ffffff;
+      font-size: 9px;
+      font-weight: bold;
+      border-radius: 8px;
+      padding: 1px 4px;
+    }
+    /* Sidebar */
+    .sidebar {
+      width: 250px;
+      background: #181818;
+      border-right: 1px solid #2b2b2b;
+      display: flex;
+      flex-direction: column;
+      font-size: 12px;
+    }
+    .sidebar-header {
+      padding: 10px 16px;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #bbbbbb;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sidebar-project {
+      padding: 6px 12px;
+      font-weight: bold;
+      font-size: 11px;
+      color: #e1e1e1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .file-tree {
+      flex: 1;
+      overflow-y: auto;
+      padding: 2px 4px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 12px;
+      line-height: 22px;
+    }
+    .tree-node {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px;
+      color: #cccccc;
+      border-radius: 3px;
+      cursor: pointer;
+      position: relative;
+    }
+    .tree-node.pl-1 { padding-left: 18px; }
+    .tree-node.pl-2 { padding-left: 30px; }
+    .tree-node.pl-3 { padding-left: 42px; }
+    .tree-node.pl-4 { padding-left: 54px; }
+    .tree-node.active-file {
+      background: #04395e;
+      color: #ffffff;
+      font-weight: 500;
+    }
+    .folder-name { color: #cccccc; font-weight: 500; }
+    .folder-icon { font-size: 12px; }
+    .file-icon { display: flex; align-items: center; }
+    /* Editor Area */
+    .editor-pane {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      background: #1e1e1e;
+      overflow: hidden;
+      position: relative;
+    }
+    .tabs-bar {
+      height: 35px;
+      background: #181818;
+      border-bottom: 1px solid #2b2b2b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .tabs-left {
+      display: flex;
+      height: 100%;
+    }
+    .tab {
+      height: 100%;
+      border-right: 1px solid #2b2b2b;
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .tab .close-btn {
+      color: #858585;
+      font-size: 12px;
+      margin-left: 6px;
+      border-radius: 3px;
+      padding: 1px 3px;
+    }
+    .tab .close-btn:hover {
+      background: #333;
+      color: #fff;
+    }
+    .tabs-right-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-right: 12px;
+      color: #858585;
+    }
+    .breadcrumbs-bar {
+      height: 24px;
+      background: #1e1e1e;
+      border-bottom: 1px solid #2b2b2b;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 11px;
+      color: #858585;
+    }
+    .breadcrumb-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .breadcrumb-item.active {
+      color: #cccccc;
+    }
+    .breadcrumb-sep {
+      color: #555555;
+    }
+    /* Code Viewer */
+    .editor-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+    .code-viewport {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 0 60px 0;
+      font-family: 'Cascadia Code', Consolas, 'Fira Code', 'Courier New', monospace;
+      font-size: 13.5px;
+      line-height: 22px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .code-line {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      min-height: 22px;
+    }
+    /*
+     * The range marker only. The fill itself belongs to the text, not the row
+     * -- see .line-content.highlighted > span below.
+     *
+     * box-shadow rather than border-left: a border is part of the box, so it
+     * pushed every highlighted line 3px right of the unhighlighted lines around
+     * it, and the code visibly stepped in and out at the range edges.
+     */
+    .code-line.highlighted {
+      box-shadow: inset 3px 0 0 0 #007acc;
+    }
+    .line-num {
+      width: 58px;
+      text-align: right;
+      padding-right: 18px;
+      color: #6e7681;
+      flex-shrink: 0;
+      user-select: none;
+      font-size: 12px;
+    }
+    .line-num.highlighted {
+      color: #ffffff;
+      font-weight: bold;
+    }
+    .line-content {
+      flex: 1;
+      white-space: pre;
+      color: #d4d4d4;
+      padding-right: 24px;
+    }
+    .line-content.highlighted {
+      color: #ffffff;
+    }
+    /*
+     * Hug the glyphs, the way an editor selection does, instead of flooding the
+     * row to the right-hand edge of the pane. The span is inline, so its
+     * background ends where the line's text ends -- including the leading
+     * indentation, which is part of the token stream.
+     */
+    .line-content.highlighted > span {
+      background: rgba(38, 79, 120, 0.75);
+      border-radius: 2px;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+    }
+    /* Blinking VS Code Caret */
+    .vs-caret {
+      display: inline-block;
+      width: 2px;
+      height: 15px;
+      background: #528bff;
+      margin-left: 2px;
+      vertical-align: middle;
+      animation: vsBlink 1s step-start infinite;
+    }
+    @keyframes vsBlink {
+      50% { opacity: 0; }
+    }
+    /* Minimap */
+    .minimap {
+      width: 68px;
+      background: #181818;
+      border-left: 1px solid #252526;
+      display: flex;
+      flex-direction: column;
+      padding: 10px 6px;
+      gap: 3px;
+      opacity: 0.65;
+      overflow: hidden;
+    }
+    .minimap-line {
+      height: 2px;
+      background: #4a4a4a;
+      border-radius: 1px;
+    }
+    .minimap-line.active {
+      background: #007acc;
+      box-shadow: 0 0 4px #007acc;
+    }
+    /* Status Bar */
+    .statusbar {
+      height: 22px;
+      background: #007acc;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      font-size: 11px;
+      z-index: 10;
+    }
+    .statusbar-left, .statusbar-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .statusbar-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="vscode-container">
+    <!-- Title Bar -->
+    <header class="titlebar">
+      <div class="titlebar-left">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="#007acc">
+          <path d="M18.5 2.5 12 8.5 7 4.5 3.5 6v12L7 19.5l5-4 6.5 6 3-1.5V4l-3-1.5z" />
+        </svg>
+        <div class="menubar">
+          <span>File</span>
+          <span>Edit</span>
+          <span>Selection</span>
+          <span>View</span>
+          <span>Go</span>
+          <span>Run</span>
+          <span>Terminal</span>
+          <span>Help</span>
+        </div>
+      </div>
+
+      <div class="titlebar-center">
+        <div class="search-left">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#858585" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <span>${escapeHtml(projectName.toLowerCase())} &gt; ${escapeHtml(
+            primaryFilePath.replace(/\\/g, '/'),
+          )}</span>
+        </div>
+        <span class="keybadge">Ctrl + P</span>
+      </div>
+
+      <div class="titlebar-controls">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+        <span>&#x2500;</span>
+        <span>&#x25A1;</span>
+        <span>&#x2715;</span>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div class="main-body">
+      <!-- Activity Bar -->
+      <aside class="activity-bar">
+        <div class="activity-group">
+          <!-- Explorer (Active) -->
+          <div class="activity-icon active">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <path d="M4 4h6l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+            </svg>
+          </div>
+          <!-- Search -->
+          <div class="activity-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+          </div>
+          <!-- Source Control -->
+          <div class="activity-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <circle cx="18" cy="18" r="3" />
+              <circle cx="6" cy="6" r="3" />
+              <path d="M18 15V9a9 9 0 0 0-9-9" />
+              <path d="M6 9v12" />
+            </svg>
+            <span class="badge">1</span>
+          </div>
+          <!-- Run & Debug -->
+          <div class="activity-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <path d="M5 3l14 9-14 9V3z" />
+            </svg>
+          </div>
+          <!-- Extensions -->
+          <div class="activity-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+            </svg>
+          </div>
+        </div>
+        <div class="activity-group">
+          <div class="activity-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <span>Explorer</span>
+          <span style="color:#858585;cursor:pointer;">&#x22EF;</span>
+        </div>
+        <div class="sidebar-project">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+          <span>${escapeHtml(projectName.toUpperCase())}</span>
+        </div>
+        <div class="file-tree">
+          ${treeNodes.join('')}
+        </div>
+      </div>
+
+      <!-- Editor Pane -->
+      <main class="editor-pane">
+        <div class="tabs-bar">
+          <div class="tabs-left">
+            ${tabHeadersHtml}
+          </div>
+          <div class="tabs-right-actions">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 3h18v18H3z"/></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+          </div>
+        </div>
+
+        ${tabBodiesHtml}
+      </main>
+    </div>
+
+    <!-- Status Bar -->
+    <footer class="statusbar">
+      <div class="statusbar-left">
+        <span class="statusbar-item" style="background:#1f8ad2;padding:0 6px;margin-left:-10px;height:100%;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg>
+        </span>
+        <span class="statusbar-item">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="18" cy="18" r="3" />
+            <circle cx="6" cy="6" r="3" />
+            <path d="M18 15V9a9 9 0 0 0-9-9" />
+            <path d="M6 9v12" />
+          </svg>
+          main*
+        </span>
+        <span class="statusbar-item">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          0&#x2193; 1&#x2191;
+        </span>
+        <span class="statusbar-item">&#x2297; 0 &nbsp;&#x26A0; 0</span>
+      </div>
+      <div class="statusbar-right">
+        <span class="statusbar-item">Ln ${startLine}, Col 1</span>
+        <span class="statusbar-item">Spaces: 2</span>
+        <span class="statusbar-item">UTF-8</span>
+        <span class="statusbar-item">${primaryLang}</span>
+        <span class="statusbar-item">Prettier &#x2713;</span>
+        <span class="statusbar-item">&#x1F514;</span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    window.switchIdeTab = function(idx) {
+      var tabs = document.querySelectorAll('.tab');
+      var views = document.querySelectorAll('.editor-body-view');
+      for (var i = 0; i < tabs.length; i++) {
+        if (i === idx) {
+          tabs[i].classList.add('active');
+          tabs[i].style.background = '#1e1e1e';
+          tabs[i].style.borderTop = '1px solid #007acc';
+          tabs[i].style.color = '#ffffff';
+        } else {
+          tabs[i].classList.remove('active');
+          tabs[i].style.background = '#181818';
+          tabs[i].style.borderTop = '1px solid transparent';
+          tabs[i].style.color = '#9d9d9d';
+        }
+        if (views[i]) views[i].style.display = i === idx ? 'flex' : 'none';
+      }
+      var fileNodes = document.querySelectorAll('.tree-node.file-node');
+      for (var j = 0; j < fileNodes.length; j++) {
+        if (fileNodes[j].getAttribute('data-tab-idx') === String(idx)) {
+          fileNodes[j].classList.add('active-file');
+        } else {
+          fileNodes[j].classList.remove('active-file');
+        }
+      }
+    };
+  </script>
+</body>
+</html>`;
+}
+
+
+

@@ -1,0 +1,51 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Node
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+uv.lock
+
+# Editor / OS
+.DS_Store
+*.log
+.temp_chunks/
+
+# ── doc-snapshot ─────────────────────────────────────────────────────────────
+# The snapshot itself (pages/, manifest.json, CHANGELOG.md) IS committed -- it is
+# the baseline every drift diff is taken against.
+#
+# reports/ is derived data in the sibling repos, so it is ignored there. Here it
+# is not: FINDINGS.md is the hand-written QA report and the whole point of the
+# repo. Ignore the generated drift output, keep the report.
+doc-snapshot/reports/*
+!doc-snapshot/reports/FINDINGS.md
+
+# ── Autorecorder ─────────────────────────────────────────────────────────────
+# Recordings are build output, reproducible from this folder plus `npm run
+# record`. Committing them is expensive: 17 clips at ~5MB, rewritten on every
+# re-record, took one sibling repo's .git to 348MB before its history had to be
+# rewritten. Publish them as release assets instead.
+autorecorder/videos/*.webm
+autorecorder/videos/.temp_chunks/
+autorecorder/videos/RUN_REPORT.md
+autorecorder/videos/RUN_REPORT.json
+autorecorder/videos/RECORD_RESULTS.json
+autorecorder/videos/logs/
+autorecorder/casts/
+
+# Stray recordings saved outside autorecorder/videos/. Video only: narration in
+# autorecorder/audio/ is .m4a and IS committed.
+*.webm
+*.mp4

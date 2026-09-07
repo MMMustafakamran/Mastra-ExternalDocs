@@ -1,0 +1,19 @@
+{
+  "name": "mastra-copilotkit-external-docs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "QA harness for Mastra's own CopilotKit guide at mastra.ai",
+  "scripts": {
+    "automate": "node ci/automate.mjs",
+    "drift": "node ci/check-doc-drift.mjs",
+    "drift:sync": "node ci/check-doc-drift.mjs --update",
+    "dev": "npm --prefix frontend run dev",
+    "record": "npm --prefix autorecorder run record --",
+    "record:all": "npm --prefix autorecorder run record",
+    "record:list": "npm --prefix autorecorder run record -- --list",
+    "record:doctor": "npm --prefix autorecorder run doctor",
+    "record:doctor:online": "npm --prefix autorecorder run doctor:online",
+    "ci:pages": "node ci/list-pages.mjs",
+    "agent": "npm --prefix mastra-server run dev"
+  }
+}

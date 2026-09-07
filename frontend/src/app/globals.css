@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+/* The recorder films at 1920x1080 and the simulated Windows taskbar occupies
+   the bottom 48px. Anything the cursor has to click must stay above it -- see
+   autorecorder/ADAPT.md, "Controls underneath the taskbar overlay". */
+:root {
+  --background: #ffffff;
+  --foreground: #0f172a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b1120;
+    --foreground: #e2e8f0;
+  }
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}

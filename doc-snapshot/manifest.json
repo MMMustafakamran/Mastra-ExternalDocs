@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "docsRoot": "https://mastra.ai",
+  "syncedAt": "2026-09-07T14:13:47.361426Z",
+  "pages": {
+    "https://mastra.ai/guides/build-your-ui/copilotkit/overview": {
+      "file": "guides__build-your-ui__copilotkit__overview.md",
+      "sha256": "77052f4d819c008fa334785d89e4a44292db0729d479031933a477504d331726",
+      "bytes": 25029,
+      "lines": 666,
+      "status": "ok"
+    }
+  }
+}
