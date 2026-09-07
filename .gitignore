@@ -11,11 +11,16 @@ out/
 next-env.d.ts
 *.tsbuildinfo
 
-# Python
+# Mastra build output. `mastra dev` bundles the whole Studio SPA into here on
+# every boot -- ~90 files including minified vendor chunks. Regenerated from
+# src/ and package-lock.json, so it is build output in exactly the way
+# autorecorder/videos/ is.
+mastra-server/.mastra/
+
+# Python (none in this repo, kept for parity with the sibling harnesses)
 .venv/
 __pycache__/
 *.py[cod]
-uv.lock
 
 # Editor / OS
 .DS_Store
