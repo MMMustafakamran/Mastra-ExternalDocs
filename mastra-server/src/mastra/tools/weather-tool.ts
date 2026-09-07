@@ -63,8 +63,15 @@ export const weatherTool = createTool({
     conditions: z.string(),
   }),
 
-  execute: async ({ context }) => {
-    const { location } = context
+  // In @mastra/core 1.64 the signature is `execute(inputData, context)` — the
+  // validated input arrives as the FIRST argument. Older Mastra examples (and
+  // most of what a search turns up) destructure `{ context }` from the first
+  // argument instead, which under 1.64 yields `undefined` and throws inside the
+  // tool. The agent then reports "the weather service is temporarily failing"
+  // and nothing names the real cause — which is worth knowing, because the page
+  // publishes `import { weatherTool } from '../tools/weather-tool'` and never
+  // publishes the tool, so a reader has to guess this signature.
+  execute: async ({ location }) => {
 
     const geo = await fetch(
       `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1`,

@@ -9,16 +9,16 @@
     "start": "mastra start"
   },
   "dependencies": {
-    "@ag-ui/client": "^0.0.59",
-    "@ag-ui/core": "^0.0.39",
-    "@ag-ui/mastra": "^1.1.2",
-    "@copilotkit/runtime": "^1.70.1",
-    "@mastra/client-js": "^0.15.0",
-    "@mastra/core": "^0.24.0",
+    "@ag-ui/client": "latest",
+    "@ag-ui/core": "latest",
+    "@ag-ui/mastra": "latest",
+    "@copilotkit/runtime": "latest",
+    "@mastra/client-js": "latest",
+    "@mastra/core": "latest",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "mastra": "^0.16.0",
+    "mastra": "latest",
     "typescript": "^5"
   }
 }

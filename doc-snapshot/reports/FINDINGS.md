@@ -3,7 +3,8 @@
 **Doc** <https://mastra.ai/guides/build-your-ui/copilotkit/overview>
 **Snapshot taken** 2026-09-07 · 1 page · `doc-snapshot/pages/`
 **Assignment said** ✅ Fully Working
-**This run says** ✅ **Every published snippet is correct.** The gap is what is *not* published: four snippets import files the page never shows.
+**This run says** ✅ **Every published snippet is correct, and all four recorded sections work end to end.** The gap is what is *not* published: four snippets import files the page never shows.
+**Recordings** 4 clips, `autorecorder/videos/MASTRA-ext-*.webm` — recorded 2026-09-07
 
 ## Versions pinned
 
@@ -11,8 +12,18 @@
 |---|---|---|
 | `@copilotkit/react-core` / `react-ui` | unpinned | 1.70.1 |
 | `@ag-ui/mastra` | unpinned | 1.1.2 |
+| `@ag-ui/core` / `@ag-ui/client` | unpinned | 0.0.59 |
 | `@copilotkit/runtime` | unpinned | 1.70.1 |
-| Model id in snippets | `openai/gpt-5.6-sol` | — |
+| `@mastra/core` | unpinned | **1.64.0** |
+| `@mastra/client-js` | unpinned | 1.43.0 |
+| `mastra` (CLI) | not named on the page | 1.27.3 |
+| Model id in snippets | `openai/gpt-5.6-sol` | real — verified against the account's model list |
+
+Every package on the page's install line is unpinned, and that turns out to
+matter: `@ag-ui/mastra@1.1.2` declares peers `@ag-ui/core >=0.0.44` and
+`@mastra/client-js >=1.0.0-0`, so any attempt to pin those to older majors
+fails `npm install` outright with ERESOLVE. Unpinned resolution is the only
+thing the page's command can mean, and it works.
 
 ## Scope note
 
@@ -35,6 +46,8 @@ sections of it, addressed by anchor.
 | 3 | [Hook-calling snippets need `"use client"` and never say so](#3--three-snippets-need-use-client-and-the-page-never-says-so) | ⚠️ Ambiguity |
 | 4 | [v1 and v2 imports alternate between adjacent sections](#4--v1-and-v2-imports-alternate-between-adjacent-sections) | 💡 Suggestion |
 | 5 | [`resourceId` is given two different meanings](#5--resourceid-is-given-two-different-meanings-on-one-page) | 💡 Suggestion |
+| 6 | [The unpublished tool's `execute` signature is easy to get wrong](#6--the-unpublished-tools-execute-signature-fails-silently-when-guessed-wrong) | ⚠️ Consequence of 2 |
+| 7 | [The progressive-rendering claim was not observed](#7--the-progressive-rendering-claim-was-not-observed) | ℹ️ Observation |
 
 None of these is a broken snippet. Every identifier the page publishes resolves
 against the current packages — checked by reading the type declarations, not by
@@ -67,8 +80,19 @@ export const mastra = new Mastra({
 So the reader is told to match a key in a structure the page does not show, in a
 file it shows three partial versions of.
 
-It matters more than it looks, because the page's own example makes the two
-easy to confuse. The published agent is:
+**Tested, and the page's value is correct.** Pointing a copy of the snippet at
+`agent="weather-agent"` — the agent's `id`, which is what Mastra's own
+`/api/agents` reports as its key — fails at runtime with:
+
+```
+Error: useAgent: Agent 'weather-agent' not found after runtime sync
+  (runtimeUrl=http://localhost:4111/copilotkit).
+  Known agents: [weatherAgent, planningAgent, bgColorAgent]
+```
+
+So `agent="weatherAgent"` is right and the map key is what counts. The defect is
+purely that the reader is told to match a structure the page never shows — and
+the example actively invites the wrong guess, because the published agent is:
 
 ```typescript
 export const weatherAgent = new Agent({
@@ -79,9 +103,10 @@ export const weatherAgent = new Agent({
 ```
 
 and the frontend passes `agent="weatherAgent"` — camelCase, matching **neither**
-`id` nor `name`. It matches the variable, which is presumably the map key. A
-reader who reasonably assumes the prop takes the agent's `id` gets a routing
-failure with nothing on the page to explain it.
+`id` nor `name`. It matches the variable name, i.e. the map key. And
+`/api/agents` on the running server keys the same agents by `id`
+(`weather-agent`), so the one place a reader can go looking for the answer shows
+them the form that does not work.
 
 Across sections the page names three agents this way — `weatherAgent`,
 `bgColorAgent`, `planningAgent` — and shows the map for none of them.
@@ -245,6 +270,61 @@ snippet immediately below passes `agent="weatherAgent"`, the same string.
 **Ask:** use a value in the example that cannot be mistaken for an agent name
 (`resourceId: 'user-session'`), or add a half-sentence saying it scopes memory
 and does not select the agent.
+
+---
+
+## 6 · The unpublished tool's `execute` signature fails silently when guessed wrong
+
+**A direct consequence of finding 2, found by running it.**
+
+The page publishes `weatherAgent` with `import { weatherTool } from '../tools/weather-tool'`
+and never publishes `weather-tool.ts`. So the reader writes it. In
+`@mastra/core` **1.64.0** the signature is:
+
+```ts
+execute?: (inputData: TSchemaIn, context: TContext) => ...
+```
+
+— the validated input arrives as the **first** argument. Most Mastra material a
+search turns up uses the older shape and destructures `{ context }` from that
+first argument instead. Under 1.64 that yields `undefined`, and the tool throws.
+
+What makes it worth reporting is how it surfaces. Nothing errors visibly: the
+run completes, the chat streams a perfectly fluent reply, and the reply is
+
+> "I'm unable to retrieve Lisbon's current weather because the weather service
+> is temporarily failing."
+
+The model narrates the tool failure as an outage. No console error, no failed
+request, no card. A reader debugging this looks at Open-Meteo, at their network,
+at their API key — everywhere except the two-character difference in a file the
+page told them to write but not how.
+
+Corrected to `execute: async ({ location }) => …`, the same agent returns real
+data on the first try (`Reykjavík … clear skies … 12.8°C`).
+
+**Ask:** publishing `weather-tool.ts` closes this and finding 2 together. It is
+about fifteen lines.
+
+---
+
+## 7 · The progressive-rendering claim was not observed
+
+**Observation, not a defect.** The Tool call rendering section says:
+
+> Because Mastra streams tool-call arguments incrementally, the `render`
+> function is called repeatedly as the arguments arrive, so the UI can paint
+> progressively while the agent works.
+
+The published render function returns `<div>Retrieving weather...</div>` while
+`status !== 'complete'`. Across the recorded runs that intermediate state was
+never seen: the card appeared already complete.
+
+That is consistent with the claim being true and the window being shorter than
+one frame — `{ location: "Reykjavik" }` is a very small argument object, so
+there is almost nothing to stream. It is recorded here only so nobody reads the
+clip as evidence the feature is broken. A tool with a larger argument payload
+would be the way to demonstrate it, and would make a better example on the page.
 
 ---
 
