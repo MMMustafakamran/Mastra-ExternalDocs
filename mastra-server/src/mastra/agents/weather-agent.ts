@@ -21,6 +21,6 @@ export const weatherAgent = new Agent({
   id: 'weather-agent',
   name: 'Weather Agent',
   instructions: 'Use the weatherTool to fetch current weather data.',
-  model: 'openai/gpt-5.6-luna',
+  model: 'openai/gpt-5.4-mini',
   tools: { weatherTool },
 })

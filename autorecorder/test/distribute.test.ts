@@ -21,7 +21,7 @@ function fakeScaffold(root: string): void {
       '# written by `copilotkit init`',
       'AGENT_URL=http://localhost:8000',
       'CPK_INTELLIGENCE_API_KEY=cpk_generated',
-      'OPENAI_MODEL=gpt-5.6-luna',
+      'OPENAI_MODEL=gpt-5.4-mini',
       '',
     ].join('\n'),
   );
@@ -29,7 +29,7 @@ function fakeScaffold(root: string): void {
   // What the operator keeps at the repo root: the real vendor key.
   writeFileSync(
     join(root, '.env'),
-    ['# repo root', 'OPENAI_API_KEY=sk-real', 'OPENAI_MODEL=gpt-5.6-luna', ''].join('\n'),
+    ['# repo root', 'OPENAI_API_KEY=sk-real', 'OPENAI_MODEL=gpt-5.4-mini', ''].join('\n'),
   );
 }
 
@@ -64,8 +64,8 @@ test('seeding merges into the CLI-generated .env instead of replacing it', () =>
 
     // Where both define a key, the seed wins and the generated value is gone —
     // not left behind as a duplicate for a dotenv parser to choose between.
-    assert.match(env, /^OPENAI_MODEL=gpt-5.6-luna$/m);
-    assert.doesNotMatch(env, /gpt-5.6-luna/);
+    assert.match(env, /^OPENAI_MODEL=gpt-5.4-mini$/m);
+    assert.doesNotMatch(env, /gpt-5.4-mini/);
 
     // node_modules is never carried into a copy: the install is the subject of
     // the test the copies exist for.
