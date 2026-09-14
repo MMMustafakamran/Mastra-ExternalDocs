@@ -20,5 +20,5 @@ export const planningAgent = new Agent({
     'When the user asks for a plan, call generate_task_steps with a list of steps. ' +
     'Each step needs a description and a status of "enabled". After the user responds, ' +
     'acknowledge which steps they kept and continue.',
-  model: 'openai/gpt-5.6-sol',
+  model: 'openai/gpt-5.6-luna',
 })

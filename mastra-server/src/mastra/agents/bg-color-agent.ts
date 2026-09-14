@@ -25,5 +25,5 @@ export const bgColorAgent = new Agent({
   instructions:
     'When the user asks for a background colour, call colorChangeTool with the requested ' +
     'colour as a CSS colour string. Confirm the change in one short sentence.',
-  model: 'openai/gpt-5.6-sol',
+  model: 'openai/gpt-5.6-luna',
 })
