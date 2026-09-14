@@ -17,6 +17,7 @@
 | `@mastra/core` | unpinned | **1.64.0** |
 | `@mastra/client-js` | unpinned | 1.43.0 |
 | `mastra` (CLI) | not named on the page | 1.27.3 |
+| `@mastra/core` | re-checked 2026-09-14 | installed here **1.64.0**; npm `latest` is now **1.66.0** |
 | Model id in snippets | `openai/gpt-5.6-sol` | real — verified against the account's model list |
 
 Every package on the page's install line is unpinned, and that turns out to
@@ -31,6 +32,21 @@ The assignment says "all pages in this section". There is **one** page. Its
 content is also served, byte-identical, at
 `https://mastra.ai/integrations/agentic-ui/copilotkit` — verified by diffing the
 two markdown responses. Only the second appears in `mastra.ai/llms.txt`.
+
+## Re-verification — 2026-09-14
+
+- **The page has not moved.** Re-fetched today: sha256
+  `77052f4d…d331726`, 25 029 bytes, identical to the 2026-09-07 snapshot.
+- **The sitemap still lists only the `/integrations/agentic-ui/copilotkit`
+  URL**, not the `/guides/…/overview` one this repo tracks. That is now recorded
+  as an alias in `doc-snapshot/manifest.json` rather than re-discovered as a
+  removed page on every drift run.
+- **`@mastra/core` moved 1.64.0 → 1.66.0** and the `createTool` execute
+  signature did not: both declare
+  `execute?: (params, options) => Promise<any>`, so finding 2's unpublished
+  contract is unchanged. The harness itself has **not** been upgraded to 1.66,
+  so nothing below has been re-run against it.
+- **All four sections re-recorded today**, 4 of 4 passing.
 
 So the "section" is one guide with two URLs, and the routes in this repo are
 sections of it, addressed by anchor.

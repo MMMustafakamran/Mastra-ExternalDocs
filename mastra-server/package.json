@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "mastra dev",
+    "dev": "mastra dev --env ../.env",
     "build": "mastra build",
     "start": "mastra start"
   },

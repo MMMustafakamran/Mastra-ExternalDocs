@@ -66,9 +66,10 @@ documentation ships an AG-UI integration guide:
 | Repo | Vendor docs under test | Verdict |
 |---|---|---|
 | `ag2/` | `docs.ag2.ai/docs/user-guide/ag-ui/` | working |
-| `agno/` | `docs.agno.com` — AG-UI interface, usage, API reference, examples | working |
 | `mastra/` | `mastra.ai/guides/build-your-ui/copilotkit/overview` | working |
-| `mspy/` | `learn.microsoft.com/.../agent-framework/integrations/ag-ui/` | **issues** |
+
+`agno/` was deleted on 2026-09-14 and `mspy/` is not in this folder; both sets
+of findings are archived in `2-externalDocs/README.md`.
 
 They are the external-docs counterpart to the eleven repos in the parent folder,
 which test `docs.copilotkit.ai`. **Findings do not transfer between the two

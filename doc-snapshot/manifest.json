@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "docsRoot": "https://mastra.ai",
+  "docsRoot": "https://mastra.ai/integrations/agentic-ui",
   "syncedAt": "2026-09-07T14:13:47.361426Z",
   "pages": {
     "https://mastra.ai/guides/build-your-ui/copilotkit/overview": {
@@ -10,5 +10,17 @@
       "lines": 666,
       "status": "ok"
     }
+  },
+  "sitemap": {
+    "aliases": {
+      "https://mastra.ai/guides/build-your-ui/copilotkit/overview": [
+        "https://mastra.ai/integrations/agentic-ui/copilotkit"
+      ]
+    },
+    "knownUnmapped": [
+      "https://mastra.ai/integrations/agentic-ui/ai-sdk-ui",
+      "https://mastra.ai/integrations/agentic-ui/assistant-ui",
+      "https://mastra.ai/integrations/agentic-ui/openui"
+    ]
   }
 }
