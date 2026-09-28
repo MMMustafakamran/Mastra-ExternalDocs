@@ -538,31 +538,14 @@ export class RecordingEngine {
       // them while reconciling <html>.
       await ensureOverlays(page, 'chrome');
 
-      // Scrolling is the part that must wait: a hydration remount snaps the
-      // page back to the top mid-scroll. Start the wait now and let the intro
-      // play over it rather than stalling on a frozen frame.
-      const hydration = waitForHydration(page, 15000);
-
-      // Crisp pause so viewer registers the doc title, then glide straight into reading
-      await sleep(500);
-      await humanGlide(page, 960, 380, 16);
-
-      // Snippet mode waits at most 1.5s: the reader should be moving, not idle.
-      const hydrated = snippets?.length
-        ? await Promise.race([hydration, sleep(1500).then(() => false)])
-        : await hydration;
-      if (!hydrated) {
-        console.warn(`   ⚠️ Doc page hydration not observed; scrolling anyway.`);
-      }
-
-      // Snippet mode: scroll down to each doc block the IDE step will show, in
-      // the same order, and select it. No skim to the bottom.
+      // Snippet mode: straight into scrolling -- no hydration wait, no pause.
+      // Scroll down to each doc block the IDE step will show, in the same
+      // order, and select it. No skim to the bottom.
       if (snippets?.length) {
         // Dark doc themes paint the default selection almost invisibly.
         await page
           .addStyleTag({ content: '::selection { background: rgba(56, 139, 253, 0.55) !important; color: inherit; }' })
           .catch(() => {});
-        await pause(600);
         const missing: string[] = [];
         for (const [i, probes] of snippets.entries()) {
           const box = await this.revealDocSnippet(page, probes);
@@ -581,6 +564,14 @@ export class RecordingEngine {
         return missing.length
           ? `Doc page: IDE snippet(s) ${missing.join(', ')} not found on the live page -- the doc may have changed`
           : null;
+      }
+
+      const hydration = waitForHydration(page, 15000);
+      // Crisp pause so viewer registers the doc title, then glide straight into reading
+      await sleep(500);
+      await humanGlide(page, 960, 380, 16);
+      if (!(await hydration)) {
+        console.warn(`   ⚠️ Doc page hydration not observed within 15s; scrolling anyway.`);
       }
 
       // Skim the whole page to the bottom in wheel bursts, so the clip shows
@@ -618,17 +609,9 @@ export class RecordingEngine {
     }
   }
 
-  /**
-   * Finds the doc code block holding an IDE snippet's probe lines, opens its
-   * tab if it sits in a hidden one, and scrolls slowly until it is near the
-   * top. Returns its box, or null when no block on the page contains them.
-   */
-  private async revealDocSnippet(
-    page: Page,
-    probes: string[],
-  ): Promise<{ x: number; y: number; width: number; height: number } | null> {
-    if (!probes.length) return null;
-    const found = await page
+  /** Marks the doc block holding the probe lines, opening its tab if hidden. */
+  private async findDocSnippet(page: Page, probes: string[]): Promise<boolean> {
+    return page
       .evaluate((probes: string[]) => {
         // No named function consts in here: tsx wraps them in a __name()
         // helper that does not exist in the page.
@@ -655,7 +638,42 @@ export class RecordingEngine {
         (window as any).__autorecordDocCode = pre;
         return true;
       }, probes)
-      .catch(() => false);
+      .catch(() => false);;
+  }
+
+  /**
+   * Finds the doc code block holding an IDE snippet's probe lines, opens its
+   * tab if it sits in a hidden one, and scrolls slowly until it is near the
+   * top. Returns its box, or null when no block on the page contains them.
+   */
+  private async revealDocSnippet(
+    page: Page,
+    probes: string[],
+  ): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    // A hydration remount replaces the page's code blocks after the first
+    // find, leaving a detached element that scrolls nowhere. Re-find until the
+    // block is attached and on screen.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const box = await this.revealDocSnippetOnce(page, probes);
+      if (box && box.y >= 0 && box.y < 800) return box;
+      await sleep(500);
+    }
+    return null;
+  }
+
+  private async revealDocSnippetOnce(
+    page: Page,
+    probes: string[],
+  ): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    if (!probes.length) return null;
+    // Some doc sites render code blocks after first paint: retry until the
+    // block exists, up to 6s, rather than waiting a fixed time up front.
+    let found = false;
+    const deadline = Date.now() + 6000;
+    while (!found && Date.now() < deadline) {
+      found = await this.findDocSnippet(page, probes);
+      if (!found) await sleep(300);
+    }
     if (!found) return null;
     await sleep(400);
 
@@ -689,8 +707,9 @@ export class RecordingEngine {
 
     return page
       .evaluate(() => {
-        const r = ((window as any).__autorecordDocCode as HTMLElement).getBoundingClientRect();
-        return r.height > 0 ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;
+        const el = (window as any).__autorecordDocCode as HTMLElement;
+        const r = el.getBoundingClientRect();
+        return el.isConnected && r.height > 0 ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;
       })
       .catch(() => null);
   }
