@@ -15,8 +15,9 @@
   "cli/versions.ts": "4b3d923ba368e10f",
   "console-capture.ts": "b70bd3179316370e",
   "diagnostics.ts": "e511f6151e51184b",
+  "doc-snippets.ts": "73cae1def8ead159",
   "doctor.ts": "471e4c0bffcd94f8",
-  "engine.ts": "515c8540c67d2145",
+  "engine.ts": "6748fdf6ff6c09af",
   "failure-evidence.ts": "c7778c541eda201d",
   "ide/generator.ts": "7ed4003376932ac1",
   "overlays/alert-dialog.ts": "1558c8ec248df353",
@@ -27,6 +28,6 @@
   "prewarm.ts": "ec794b197b456de2",
   "select.ts": "e364cf022ad4551c",
   "timeouts.ts": "ba4e52b004b4fa04",
-  "types.ts": "d41b392e417201f4",
+  "types.ts": "06a25ce4660d9de6",
   "versions.ts": "524cafa17d36a91d"
 }

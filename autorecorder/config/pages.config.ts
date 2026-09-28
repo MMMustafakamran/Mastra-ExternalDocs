@@ -42,10 +42,10 @@ const PAGE_DEFS: PageDefinition[] = [
     // The runtime registration first — `registerCopilotKit` is the whole
     // server-side integration — then the page's own frontend.
     ideFile: 'mastra-server/src/mastra/index.ts',
-    startLine: 19,
+    startLine: 54,
     endLine: 67,
     extraTabs: [
-      { filePath: 'frontend/src/app/quickstart/demo-chat/page.tsx', startLine: 28, endLine: 45 },
+      { filePath: 'frontend/src/app/quickstart/demo-chat/page.tsx', startLine: 30, endLine: 45 },
     ],
 
     prompt: 'What is the weather in Lisbon right now?',
@@ -60,12 +60,11 @@ const PAGE_DEFS: PageDefinition[] = [
 
     // The v2 hook, then the two files the page imports and never publishes:
     // the tool whose result it spreads, and the agent that owns the tool.
-    ideFile: 'frontend/src/app/tool-rendering/demo-chat/page.tsx',
-    startLine: 28,
-    endLine: 59,
+    ideFile: 'mastra-server/src/mastra/agents/weather-agent.ts',
+    startLine: 17,
+    endLine: 26,
     extraTabs: [
-      { filePath: 'mastra-server/src/mastra/agents/weather-agent.ts', startLine: 17, endLine: 26 },
-      { filePath: 'mastra-server/src/mastra/tools/weather-tool.ts', startLine: 47, endLine: 70 },
+      { filePath: 'frontend/src/app/tool-rendering/demo-chat/page.tsx', startLine: 30, endLine: 59 },
     ],
 
     prompt: 'What is the weather in Reykjavik?',
@@ -79,12 +78,8 @@ const PAGE_DEFS: PageDefinition[] = [
     route: 'frontend-tools',
 
     ideFile: 'frontend/src/app/frontend-tools/demo-chat/page.tsx',
-    startLine: 27,
+    startLine: 29,
     endLine: 53,
-    extraTabs: [
-      // The agent the page describes in one sentence and never publishes.
-      { filePath: 'mastra-server/src/mastra/agents/bg-color-agent.ts', startLine: 20, endLine: 29 },
-    ],
 
     prompt: 'Change the background to a deep navy blue.',
     waitAfterPromptMs: 14_000,
@@ -97,12 +92,8 @@ const PAGE_DEFS: PageDefinition[] = [
     route: 'human-in-the-loop',
 
     ideFile: 'frontend/src/app/human-in-the-loop/demo-chat/page.tsx',
-    startLine: 30,
+    startLine: 32,
     endLine: 66,
-    extraTabs: [
-      // The component the page specifies in a paragraph and never publishes.
-      { filePath: 'frontend/src/components/steps-feedback.tsx', startLine: 20, endLine: 60 },
-    ],
 
     prompt: 'Plan a three-step launch checklist for a new landing page.',
     waitAfterPromptMs: 20_000,

@@ -20,6 +20,7 @@ import {
   writeFailureLog,
   type LogSource,
 } from './failure-evidence';
+import { runCommandsCast, snippetProbes } from './doc-snippets';
 import { generateIdeHtml, type IdeTabConfig } from './ide/generator';
 import { closeNotepad, openNotepad, typeInNotepad } from './overlays/notepad';
 import { humanClick, humanGlide, humanScrollDown, restCursorSomewhere, sleep } from './overlays/cursor';
@@ -520,6 +521,7 @@ export class RecordingEngine {
     docUrl: string,
     nextApp: 'vscode' | 'chrome' | 'terminal',
     timeouts: RecorderTimeouts,
+    snippets?: string[][],
   ): Promise<string | null> {
     console.log(`\n📖 Step 1: Navigating to Official Doc (${docUrl})...`);
     try {
@@ -545,8 +547,40 @@ export class RecordingEngine {
       await sleep(500);
       await humanGlide(page, 960, 380, 16);
 
-      if (!(await hydration)) {
-        console.warn(`   ⚠️ Doc page hydration not observed within 15s; scrolling anyway.`);
+      // Snippet mode waits at most 1.5s: the reader should be moving, not idle.
+      const hydrated = snippets?.length
+        ? await Promise.race([hydration, sleep(1500).then(() => false)])
+        : await hydration;
+      if (!hydrated) {
+        console.warn(`   ⚠️ Doc page hydration not observed; scrolling anyway.`);
+      }
+
+      // Snippet mode: scroll down to each doc block the IDE step will show, in
+      // the same order, and select it. No skim to the bottom.
+      if (snippets?.length) {
+        // Dark doc themes paint the default selection almost invisibly.
+        await page
+          .addStyleTag({ content: '::selection { background: rgba(56, 139, 253, 0.55) !important; color: inherit; }' })
+          .catch(() => {});
+        await pause(600);
+        const missing: string[] = [];
+        for (const [i, probes] of snippets.entries()) {
+          const box = await this.revealDocSnippet(page, probes);
+          if (!box) {
+            missing.push(`#${i + 1}`);
+            continue;
+          }
+          console.log(`   📌 Doc snippet ${i + 1}/${snippets.length} found; selecting it...`);
+          await pause(1100);
+          await dragSelectDocCode(page, box);
+          await pause(1600);
+          await page.evaluate(() => window.getSelection()?.removeAllRanges()).catch(() => {});
+        }
+        console.log(`   🖱️ Switching to ${nextApp} via Windows 11 Taskbar...`);
+        await clickTaskbarApp(page, nextApp);
+        return missing.length
+          ? `Doc page: IDE snippet(s) ${missing.join(', ')} not found on the live page -- the doc may have changed`
+          : null;
       }
 
       // Skim the whole page to the bottom in wheel bursts, so the clip shows
@@ -582,6 +616,83 @@ export class RecordingEngine {
       await sleep(600);
       return note;
     }
+  }
+
+  /**
+   * Finds the doc code block holding an IDE snippet's probe lines, opens its
+   * tab if it sits in a hidden one, and scrolls slowly until it is near the
+   * top. Returns its box, or null when no block on the page contains them.
+   */
+  private async revealDocSnippet(
+    page: Page,
+    probes: string[],
+  ): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    if (!probes.length) return null;
+    const found = await page
+      .evaluate((probes: string[]) => {
+        // No named function consts in here: tsx wraps them in a __name()
+        // helper that does not exist in the page.
+        const need = Math.min(2, probes.length);
+        const pre = Array.from(document.querySelectorAll('pre')).find((b) => {
+          const t = (b.textContent || '').replace(/\s+/g, ' ');
+          return probes.filter((p) => t.includes(p)).length >= need;
+        });
+        if (!pre) return false;
+        if (pre.getBoundingClientRect().height === 0) {
+          // mkdocs-material tabs
+          const block = pre.closest('.tabbed-block');
+          const set = block?.closest('.tabbed-set');
+          if (block && set) {
+            const idx = Array.from(set.querySelectorAll('.tabbed-block')).indexOf(block);
+            (set.querySelectorAll('.tabbed-labels > label')[idx] as HTMLElement | undefined)?.click();
+          }
+          // ARIA tabs
+          const panel = pre.closest('[role="tabpanel"]');
+          if (panel?.id) {
+            (document.querySelector(`[role="tab"][aria-controls="${panel.id}"]`) as HTMLElement | null)?.click();
+          }
+        }
+        (window as any).__autorecordDocCode = pre;
+        return true;
+      }, probes)
+      .catch(() => false);
+    if (!found) return null;
+    await sleep(400);
+
+    await page
+      .evaluate(() => {
+        const pre = (window as any).__autorecordDocCode as HTMLElement;
+        let scroller: HTMLElement | null = pre.parentElement;
+        while (scroller && scroller !== document.body) {
+          const oy = getComputedStyle(scroller).overflowY;
+          if ((oy === 'auto' || oy === 'scroll') && scroller.scrollHeight > scroller.clientHeight) break;
+          scroller = scroller.parentElement;
+        }
+        const el = scroller && scroller !== document.body ? scroller : (document.scrollingElement as HTMLElement);
+        const top = el === document.scrollingElement ? 0 : el.getBoundingClientRect().top;
+        const from = el.scrollTop;
+        const dist = pre.getBoundingClientRect().top - top - 140;
+        const ms = Math.min(2600, Math.max(700, Math.abs(dist) * 0.9));
+        return new Promise<void>((done) => {
+          const t0 = performance.now();
+          (window as any).__autorecordScrollTick = (now: number) => {
+            const t = Math.min(1, (now - t0) / ms);
+            el.scrollTop = from + dist * (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+            if (t < 1) requestAnimationFrame((window as any).__autorecordScrollTick);
+            else done();
+          };
+          requestAnimationFrame((window as any).__autorecordScrollTick);
+        });
+      })
+      .catch(() => {});
+    await sleep(350);
+
+    return page
+      .evaluate(() => {
+        const r = ((window as any).__autorecordDocCode as HTMLElement).getBoundingClientRect();
+        return r.height > 0 ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;
+      })
+      .catch(() => null);
   }
 
   /**
@@ -939,37 +1050,62 @@ export class RecordingEngine {
       // ----------------------------------------------------
       // STEP 1: OFFICIAL DOC PAGE & HUMAN READING SCROLL
       // ----------------------------------------------------
-      const docNote = await this.showDocPage(page, config.docUrl, 'vscode', timeouts);
+      const ideTabs = config.showIde === false
+        ? []
+        : [
+            { filePath: config.ideFile, startLine: config.startLine, endLine: config.endLine },
+            ...(config.extraTabs ?? []),
+          ];
+      const runCast = runCommandsCast(this.rootDir, [
+        { cmd: PROJECT.backendStartCmd, log: 'backend.log', ready: /running on|listening|ready|started/i },
+        { cmd: PROJECT.frontendStartCmd, log: 'frontend.log', ready: /ready in|local:/i },
+      ]);
+      if (!runCast) warnings.push('Run commands not shown: no server logs from this run');
+      const afterIde = runCast || service ? 'terminal' : 'chrome';
+
+      const docNote = await this.showDocPage(
+        page,
+        config.docUrl,
+        ideTabs.length ? 'vscode' : afterIde,
+        timeouts,
+        ideTabs.map((t) => snippetProbes(this.rootDir, t)),
+      );
       if (docNote) warnings.push(docNote);
 
       // ----------------------------------------------------
-      // STEP 2: SHOW PROJECT CODE IN VS CODE IDE WITH SNIPPET SELECTION
+      // STEP 2: THE SAME SNIPPETS IN VS CODE, IN THE SAME ORDER
       // ----------------------------------------------------
-      const hasExtraTabs = Boolean(config.extraTabs && config.extraTabs.length > 0);
-      console.log(
-        `\n💻 Step 2: Displaying Project Code in VS Code IDE (${config.ideFile}: lines ${config.startLine}-${config.endLine})...`,
-      );
-      try {
-        await this.showIde(
-          page,
-          [
-            { filePath: config.ideFile, startLine: config.startLine, endLine: config.endLine },
-            ...(config.extraTabs ?? []),
-          ],
-          config.demoUrl,
-          { dwellMs: hasExtraTabs ? 1500 : 1800, clickTabs: true },
-        );
+      if (ideTabs.length) {
+        console.log(`\n💻 Step 2: Showing ${ideTabs.length} doc snippet(s) in VS Code...`);
+        try {
+          await this.showIde(page, ideTabs, config.demoUrl, {
+            dwellMs: ideTabs.length > 1 ? 1500 : 1800,
+            clickTabs: true,
+          });
+          console.log(`   🖱️ Switching to ${afterIde} via Windows 11 Taskbar...`);
+          await clickTaskbarApp(page, afterIde);
+        } catch (e) {
+          const msg = `IDE view failed: ${diagnoseError(e, 'ide-simulation')}`;
+          fail(msg);
+          console.error(`❌ ${msg}`);
+          await sleep(600);
+        }
+      }
 
-        // Straight to the terminal when this page has a server to show starting;
-        // otherwise back to the browser for the demo.
-        const nextApp = service ? 'terminal' : 'chrome';
-        console.log(`   🖱️ Switching to ${nextApp} via Windows 11 Taskbar...`);
-        await clickTaskbarApp(page, nextApp);
-      } catch (e) {
-        const msg = `IDE view failed: ${diagnoseError(e, 'ide-simulation')}`;
-        fail(msg);
-        console.error(`❌ ${msg}`);
-        await sleep(600);
+      // ----------------------------------------------------
+      // STEP 2a: THE COMMANDS THAT RUN THE PROJECT
+      // ----------------------------------------------------
+      if (runCast) {
+        console.log(`\n⌨️  Step 2a: Showing the commands that run the project...`);
+        try {
+          await this.playCastInTerminal(page, { cast: runCast, title: 'Terminal', origin: config.demoUrl });
+          if (!service) {
+            console.log(`   🖱️ Switching back to Chrome via Windows 11 Taskbar...`);
+            await clickTaskbarApp(page, 'chrome');
+          }
+        } catch (e) {
+          warnings.push(`Run commands terminal: ${diagnoseError(e, 'cli-replay')}`);
+        }
       }
 
       // ----------------------------------------------------

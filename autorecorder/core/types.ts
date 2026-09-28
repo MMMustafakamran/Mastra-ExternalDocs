@@ -76,6 +76,13 @@ export interface PageDefinition {
   /** Extra IDE tabs to switch through, each with its own range. */
   extraTabs?: IdeTabConfig[];
 
+  /**
+   * False skips the VS Code step: for pages with no doc code in the project.
+   * Otherwise every tab must be verbatim doc code -- the doc step finds and
+   * selects the matching block on the page before VS Code shows it.
+   */
+  showIde?: boolean;
+
   /** Prompt to send. For multi-turn pages this is the first one. */
   prompt: string;
 

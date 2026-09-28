@@ -61,7 +61,7 @@ export const PROJECT: ProjectConfig = {
   backendHealthPath: '/',
 
   frontendStartCmd: 'cd frontend && npm run dev',
-  backendStartCmd: 'cd mastra-server && npm run dev',
+  backendStartCmd: 'cd mastra-server && npx mastra dev',
 
   demoSuffix: '/demo-chat',
 
