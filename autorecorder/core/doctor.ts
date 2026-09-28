@@ -224,7 +224,7 @@ function checkPages(rootDir: string, problems: Problem[]): void {
 
     // The demo route has to exist in this repo's frontend. A page listed here
     // with no route behind it is the "pages with no /demo route" gap from
-    // project-context.md, and it only surfaced before as an HTTP 404 at record
+    // REPOS.md (workspace root), and it only surfaced before as an HTTP 404 at record
     // time. Checked statically where the frontend is a Next.js App Router
     // tree; other frontends skip it (and --online still probes the URL).
     if (!page.devServer) {

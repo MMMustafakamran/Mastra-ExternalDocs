@@ -1,0 +1,507 @@
+name: Weekly Doc Check, Version Watch and Demo Recording
+
+# Ported from the sibling repos' daily-recorder.yml (MsPy-react), same stages,
+# each gating the next:
+#
+#   1. drift    -- do the live docs (mastra.ai) still say what doc-snapshot/
+#                  says? On a scheduled run, drift STOPS here and files an
+#                  issue pointing at the Doc sync workflow.
+#   2. versions -- what resolved today, and does the documented install still
+#                  work? Reports; never blocks.
+#   3. record   -- two sharded workers (four pages), then consolidate.
+#
+# Differences from the siblings: one checkbox per page (PAGE_GROUPS in
+# ci/lib/pages.mjs), the backend is the Node mastra-server/ (`mastra dev`), not uv, and no README status check (these repos
+# have no nav-config.ts for ci/write-readme-status.mjs to read).
+
+on:
+  schedule:
+    # 00:00 UTC Monday = 5:00 AM PKT Monday (Asia/Karachi, UTC+5, no DST).
+    # GitHub's scheduler is best-effort and the sibling repos see crons fire
+    # hours late; if exact timing matters, dispatch with `gh workflow run`.
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      group_quickstart:
+        description: 'Quickstart'
+        type: boolean
+        default: false
+      group_tool_rendering:
+        description: 'Tool call rendering'
+        type: boolean
+        default: false
+      group_frontend_tools:
+        description: 'Frontend tools'
+        type: boolean
+        default: false
+      group_human_in_the_loop:
+        description: 'Human in the loop'
+        type: boolean
+        default: false
+      pages:
+        description: 'Exact page ids, comma-separated (added to any ticked above). Blank + nothing ticked = all pages.'
+        required: false
+        type: string
+        default: ''
+      use_lockfile:
+        description: 'Install the committed lockfiles instead of re-resolving.'
+        required: false
+        type: boolean
+        default: false
+      run_mode:
+        description: 'What this run should do'
+        required: false
+        type: choice
+        default: 'record-through-drift'
+        options:
+          - 'record-through-drift'   # drift is reported, then recorded anyway
+          - 'halt-on-drift'          # behave like the scheduled run: drift stops it
+          - 'checks-only'            # drift + versions, no recording
+      custom_args:
+        description: 'Extra recorder args (e.g. --limit=1). Overrides every selection above.'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: weekly-recorder-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  prepare:
+    name: 1. Doc drift gate & run selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      run_name: ${{ steps.meta.outputs.run_name }}
+      pages: ${{ steps.meta.outputs.pages }}
+      drift_state: ${{ steps.check.outputs.state }}
+      should_record: ${{ steps.decide.outputs.should_record }}
+      gated: ${{ steps.decide.outputs.gated }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - id: meta
+        env:
+          INPUT_PAGES: ${{ inputs.pages }}
+        run: |
+          set -euo pipefail
+
+          RUN_NAME="$(node ci/run-name.mjs)"
+          echo "run_name=$RUN_NAME" >> "$GITHUB_OUTPUT"
+          echo "Artifacts will be named: $RUN_NAME"
+
+          SEL_GROUPS=""
+          add_group() { [ "$1" = "true" ] && SEL_GROUPS="${SEL_GROUPS:+$SEL_GROUPS,}$2" || true; }
+          add_group "${{ inputs.group_quickstart }}" quickstart
+          add_group "${{ inputs.group_tool_rendering }}" tool_rendering
+          add_group "${{ inputs.group_frontend_tools }}" frontend_tools
+          add_group "${{ inputs.group_human_in_the_loop }}" human_in_the_loop
+
+          PAGES="$(node ci/resolve-selection.mjs --pages="${INPUT_PAGES:-}" --groups="$SEL_GROUPS")"
+          echo "pages=$PAGES" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 🎬 $RUN_NAME"
+            if [ -n "$PAGES" ]; then
+              echo "Recording: \`$PAGES\`"
+            else
+              echo "Recording: **all pages**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # This repo's check-doc-drift.mjs exits 0 when clean and 2 on drift OR
+      # on a page it could not read -- both mean "do not record unattended".
+      # Any other code is the checker itself failing: drift unknown, not absent.
+      - name: Check the live docs against doc-snapshot/
+        id: check
+        run: |
+          set +e
+          node ci/check-doc-drift.mjs > drift.txt 2>&1
+          CODE=$?
+          set -e
+          cat drift.txt
+
+          if [ "$CODE" = "2" ]; then
+            echo "state=drift"   >> "$GITHUB_OUTPUT"
+          elif [ "$CODE" = "0" ]; then
+            echo "state=clean"   >> "$GITHUB_OUTPUT"
+          else
+            echo "state=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "## 1. Doc drift"
+            echo
+            case "$CODE" in
+              0) echo "**Clean.** The live docs match the committed snapshot." ;;
+              2) echo "**Drifted (or a page was unreadable).** See the report below." ;;
+              *) echo "**Unknown.** The drift checker exited $CODE. Drift is unknown, not absent." ;;
+            esac
+            echo
+            echo '```'
+            cat drift.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit 0
+
+      - name: Open or update the drift issue
+        continue-on-error: true
+        if: steps.check.outputs.state == 'drift' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let drift = fs.readFileSync('drift.txt', 'utf8').trim();
+            if (drift.length > 55000) {
+              drift = drift.slice(0, 55000) + '\n... (truncated -- see the drift artifact on the run)';
+            }
+            const body = [
+              'The live docs changed in a way that invalidates what this repo records.',
+              'Recording was **halted** -- clips of a demo that no longer matches the',
+              'page document nothing.',
+              '',
+              '### What drifted',
+              '',
+              '```',
+              drift,
+              '```',
+              '',
+              '**To clear:** review the diff above, then run the **Doc sync** workflow',
+              '(Actions -> Doc sync -> Run workflow). It rewrites `doc-snapshot/` and',
+              'opens a PR carrying this diff in its body. Reconcile the harness with',
+              'the new code blocks on that branch, merge, then re-run this workflow.',
+              '',
+              `_Doc sync: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/workflows/doc-sync.yml_`,
+              `_Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}_`,
+            ].join('\n');
+
+            const title = 'Doc drift: the live docs moved';
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'doc-drift',
+            });
+            const existing = open.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['doc-drift'],
+              });
+            }
+
+      - name: Decide whether to record
+        id: decide
+        env:
+          STATE: ${{ steps.check.outputs.state }}
+          RUN_MODE: ${{ inputs.run_mode }}
+        run: |
+          set -euo pipefail
+
+          # A scheduled run is unattended, so drift halts it. A manual run only
+          # halts if the operator chose halt-on-drift.
+          GATING=false
+          if [ "$STATE" != "clean" ]; then
+            if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ] || [ "${RUN_MODE:-}" = "halt-on-drift" ]; then
+              GATING=true
+            fi
+          fi
+
+          if [ "${RUN_MODE:-}" = "checks-only" ]; then
+            echo "should_record=false" >> "$GITHUB_OUTPUT"
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+            echo "> Checks-only run requested -- stages 1 and 2 only, no recording." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$GATING" = "true" ]; then
+            echo "should_record=false" >> "$GITHUB_OUTPUT"
+            echo "gated=true" >> "$GITHUB_OUTPUT"
+            echo "> **Pipeline stopped at stage 1.** Drift is $STATE; recording skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_record=true" >> "$GITHUB_OUTPUT"
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.run_name }}-drift
+          path: drift.txt
+          retention-days: 30
+          if-no-files-found: warn
+
+  versions:
+    name: 2. Versions & setup
+    needs: prepare
+    if: needs.prepare.outputs.gated != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Resolve the way ci/automate.mjs does by default: lockfiles dropped, so
+      # this is what the package ranges give today.
+      - name: Re-resolve dependencies
+        run: |
+          set -euo pipefail
+          rm -f frontend/package-lock.json autorecorder/package-lock.json
+          npm --prefix frontend install --no-audit --no-fund
+          npm --prefix autorecorder install --no-audit --no-fund
+
+      - name: Re-resolve the Mastra server
+        run: |
+          set -euo pipefail
+          rm -f mastra-server/package-lock.json
+          npm --prefix mastra-server install --no-audit --no-fund
+
+      # One resolution shared by every shard, so all record on the same tree.
+      - name: Share the resolved trees with the workers
+        uses: actions/cache/save@v4
+        with:
+          key: resolved-deps-${{ github.run_id }}
+          path: |
+            frontend/node_modules
+            frontend/package-lock.json
+            autorecorder/node_modules
+            autorecorder/package-lock.json
+            mastra-server/node_modules
+            mastra-server/package-lock.json
+
+      - name: Report the versions this run resolved
+        run: |
+          set -euo pipefail
+          {
+            echo "## 2. Versions and setup"
+            echo
+            echo "Setup verified: a lockfile-free install succeeded."
+            echo
+            echo "<details><summary>Resolved top-level versions</summary>"
+            echo
+            echo '```'
+            npm --prefix frontend ls --depth=0 2>&1 || true
+            echo
+            npm --prefix mastra-server ls --depth=0 2>&1 || true
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  checks:
+    name: 2a. Typecheck & tests
+    needs: [prepare, versions]
+    if: always() && needs.prepare.outputs.gated != 'true' && needs.versions.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore the resolved trees from stage 2
+        uses: actions/cache/restore@v4
+        with:
+          key: resolved-deps-${{ github.run_id }}
+          fail-on-cache-miss: true
+          path: |
+            frontend/node_modules
+            frontend/package-lock.json
+            autorecorder/node_modules
+            autorecorder/package-lock.json
+            mastra-server/node_modules
+            mastra-server/package-lock.json
+
+      # Reported, not gating: a doc snippet that no longer typechecks is a
+      # finding, not a build break.
+      - name: Typecheck, unit tests, core drift
+        run: |
+          set +e
+          npx --prefix frontend tsc --noEmit -p frontend/tsconfig.json > typecheck.txt 2>&1
+          FE=$?
+          npx --prefix autorecorder tsc --noEmit -p autorecorder/tsconfig.json >> typecheck.txt 2>&1
+          AR=$?
+          npm --prefix autorecorder test > recorder-tests.txt 2>&1
+          UT=$?
+          npm --prefix autorecorder run core:check > core-check.txt 2>&1
+          CC=$?
+          set -e
+          cat typecheck.txt recorder-tests.txt core-check.txt
+          {
+            echo "## 2a. Typecheck, unit tests, core drift"
+            echo
+            if [ "$FE" = "0" ]; then echo "- frontend typecheck: **clean**"; else echo "- frontend typecheck: **$(grep -c 'error TS' typecheck.txt) error(s)** -- see the job log"; fi
+            if [ "$AR" = "0" ]; then echo "- autorecorder typecheck: **clean**"; else echo "- autorecorder typecheck: **errors** -- see the job log"; fi
+            if [ "$UT" = "0" ]; then echo "- autorecorder unit tests: **pass**"; else echo "- autorecorder unit tests: **failing** -- see the job log"; fi
+            if [ "$CC" = "0" ]; then echo "- autorecorder core/: **matches CORE_MANIFEST.json**"; else echo "- autorecorder core/: **drifted from CORE_MANIFEST.json**"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  record-workers:
+    name: 3. Worker ${{ matrix.shard }}/2
+    needs: [prepare, versions]
+    if: always() && needs.prepare.outputs.should_record == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+
+    env:
+      AUTORECORD_PACE: '0.85'
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore the resolved trees from stage 2
+        id: resolved
+        uses: actions/cache/restore@v4
+        with:
+          key: resolved-deps-${{ github.run_id }}
+          path: |
+            frontend/node_modules
+            frontend/package-lock.json
+            autorecorder/node_modules
+            autorecorder/package-lock.json
+            mastra-server/node_modules
+            mastra-server/package-lock.json
+
+      - name: Cache the Playwright browser
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('autorecorder/package-lock.json') }}
+
+      - name: Install Playwright & System Chromium Dependencies
+        run: |
+          cd autorecorder
+          [ -d node_modules/playwright ] || npm install
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - name: Record demos (shard ${{ matrix.shard }}/2)
+        env:
+          SELECTED_PAGES: ${{ needs.prepare.outputs.pages }}
+          INPUT_CUSTOM_ARGS: ${{ inputs.custom_args }}
+          INPUT_USE_LOCKFILE: ${{ inputs.use_lockfile }}
+          RESOLVED_HIT: ${{ steps.resolved.outputs.cache-hit }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_CUSTOM_ARGS:-}" ]; then
+            RECORD_ARGS="${INPUT_CUSTOM_ARGS}"
+          elif [ -n "${SELECTED_PAGES:-}" ]; then
+            RECORD_ARGS="--pages=${SELECTED_PAGES} --shard=${SHARD}/2"
+          else
+            RECORD_ARGS="--shard=${SHARD}/2"
+          fi
+
+          EXTRA_FLAGS=""
+          if [ "${INPUT_USE_LOCKFILE:-false}" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --use-lockfile"
+          elif [ "${RESOLVED_HIT:-false}" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --use-lockfile --skip-install"
+            echo "- Dependencies: the trees stage 2 resolved this run, installed once" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Stage 1 already decided on drift; the shard never contacts the docs.
+          EXTRA_FLAGS="$EXTRA_FLAGS --skip-doc-drift"
+
+          echo "Shard ${SHARD}/2 flags: $EXTRA_FLAGS $RECORD_ARGS"
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+            node ci/automate.mjs $EXTRA_FLAGS $RECORD_ARGS
+
+      - name: Publish Shard Report to GitHub Summary
+        if: always()
+        run: |
+          if [ -f "autorecorder/videos/RUN_REPORT.md" ]; then
+            echo "### 🧩 Worker Shard ${{ matrix.shard }}/2 Summary" >> $GITHUB_STEP_SUMMARY
+            cat autorecorder/videos/RUN_REPORT.md >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### 🧩 Worker Shard ${{ matrix.shard }}/2 produced no report" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Name shard-specific files
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p autorecorder/videos && cd autorecorder/videos
+          for f in RUN_REPORT.md RUN_REPORT.json RECORD_RESULTS.json; do
+            [ -f "$f" ] && mv "$f" "${f%.*}-shard-${{ matrix.shard }}.${f##*.}" || true
+          done
+          if [ -d logs ]; then
+            for f in logs/*.log; do
+              [ -f "$f" ] && mv "$f" "${f%.log}-shard-${{ matrix.shard }}.log" || true
+            done
+          fi
+
+      - name: Upload Shard Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.run_name }}-shard-${{ matrix.shard }}
+          path: |
+            autorecorder/videos/*.webm
+            autorecorder/videos/RUN_REPORT-shard-*.md
+            autorecorder/videos/RUN_REPORT-shard-*.json
+            autorecorder/videos/RECORD_RESULTS-shard-*.json
+            autorecorder/videos/logs/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  consolidate-recordings:
+    name: 4. Consolidate & merge all video artifacts
+    needs: [prepare, record-workers]
+    if: always() && needs.prepare.outputs.should_record == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-recordings
+          pattern: ${{ needs.prepare.outputs.run_name }}-shard-*
+          merge-multiple: true
+
+      - name: Upload Consolidated Demo Recordings Package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.run_name }}
+          path: all-recordings/
+          if-no-files-found: ignore
+          retention-days: 14

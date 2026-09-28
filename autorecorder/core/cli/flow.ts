@@ -54,6 +54,25 @@ export interface CliSelect {
   /** Row label to land on. Substring match, case-insensitive. */
   label: string;
 
+  /**
+   * Require the row to equal `label` rather than merely contain it.
+   *
+   * Substring matching is right for the framework picker, where the rows are
+   * long product names and the config names a distinctive fragment. It is
+   * wrong wherever one row's label is a prefix of another's, because the walk
+   * stops at whichever comes first and reports success either way.
+   *
+   * The Intelligence project picker is exactly that case: the projects on this
+   * account are `myapp` and `myapp1`, so a substring match for `myapp` lands on
+   * whichever the list happens to order first. Getting it wrong is silent — the
+   * CLI provisions a key for the other project, the app starts, the chat
+   * answers, and the recording shows a green run against the wrong backend.
+   *
+   * Compared after trimming and lowercasing, so it tolerates the padding the
+   * marker glyph leaves behind but nothing else.
+   */
+  exact?: boolean;
+
   /** Direction to walk. Down suits every list seen so far. */
   key?: Extract<CliKeyName, 'Down' | 'Up'>;
 

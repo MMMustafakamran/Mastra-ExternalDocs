@@ -12,11 +12,18 @@ import {
   type RunningService,
 } from './cli/service';
 import { generateTerminalHtml } from './cli/terminal';
-import { captureConsole, type ConsoleEntry } from './console-capture';
+import { breakingErrors, captureConsole, type ConsoleEntry } from './console-capture';
+import {
+  buildFailureEvidence,
+  evidenceCast,
+  snapshotLogOffsets,
+  writeFailureLog,
+  type LogSource,
+} from './failure-evidence';
 import { generateIdeHtml, type IdeTabConfig } from './ide/generator';
 import { closeNotepad, openNotepad, typeInNotepad } from './overlays/notepad';
 import { humanClick, humanGlide, humanScrollDown, restCursorSomewhere, sleep } from './overlays/cursor';
-import { pause, seedTake } from './overlays/human';
+import { between, jitter, pause, seedTake } from './overlays/human';
 import { clickTaskbarApp, ensureOverlays, waitForHydration } from './overlays/taskbar';
 import { timeoutsFor } from './timeouts';
 import { type ActionContext, type PageRecordConfig, type RecorderTimeouts } from './types';
@@ -66,6 +73,129 @@ async function humanScrollCodeViewport(
   }, { targetY: targetScrollTop, idx: viewIdx });
 
   await sleep(350);
+}
+
+/** Current scroll offset of the doc page's scroller (or the window). */
+async function docScrollTop(page: Page): Promise<number> {
+  return page
+    .evaluate(() => {
+      const el = (window as any).__autorecordScroller as HTMLElement | null;
+      return el ? el.scrollTop : window.scrollY;
+    })
+    .catch(() => 0);
+}
+
+/**
+ * Scrolls the doc page back up so its first real code block sits in the upper
+ * half of the viewport, and returns that block's on-screen box. Uses the same
+ * scroller `humanScrollDown` resolved, smoothly, so it reads as the reader
+ * going back for the code. Null when the page has no code block.
+ */
+async function scrollDocCodeBlockIntoView(
+  page: Page,
+): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  const found = await page
+    .evaluate((sel) => {
+      const scroller = ((window as any).__autorecordScroller as HTMLElement | null) ?? null;
+      const pres = Array.from(document.querySelectorAll(sel)).filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.height > 60 && r.width > 200;
+      });
+      const pre = pres[0] as HTMLElement | undefined;
+      if (!pre) return false;
+      const r = pre.getBoundingClientRect();
+      const wanted = 160; // where the block's top should land
+      if (scroller) scroller.scrollTo({ top: scroller.scrollTop + r.top - wanted, behavior: 'smooth' });
+      else window.scrollTo({ top: window.scrollY + r.top - wanted, behavior: 'smooth' });
+      (window as any).__autorecordDocCode = pre;
+      return true;
+    }, SELECTORS.docCodeBlock)
+    .catch(() => false);
+  if (!found) return null;
+  await sleep(900);
+  return page
+    .evaluate(() => {
+      const pre = (window as any).__autorecordDocCode as HTMLElement | null;
+      if (!pre) return null;
+      const r = pre.getBoundingClientRect();
+      return { x: r.left, y: r.top, width: r.width, height: r.height };
+    })
+    .catch(() => null);
+}
+
+/**
+ * Selects a doc-page code block the way a reader does: press at its first
+ * line, drag to its last. The selection is the browser's own -- extended with
+ * `caretRangeFromPoint` under the cursor on every step -- so it paints exactly
+ * as a real drag would on that site. A page that refuses selection (user-select:
+ * none) gets the other gesture a reader makes: the cursor circling the block.
+ * Either way about a second.
+ */
+async function dragSelectDocCode(
+  page: Page,
+  box: { x: number; y: number; width: number; height: number },
+): Promise<void> {
+  const pad = 12;
+  const x0 = box.x + pad + 2;
+  const y0 = box.y + 10;
+  const y1 = Math.min(box.y + box.height - pad - 4, 1010);
+  const x1 = box.x + Math.min(box.width - pad, pad + 460);
+  await humanGlide(page, x0, y0, 18);
+  await sleep(between(60, 140));
+  await page.evaluate(`(function(){var c=document.getElementById('playwright-virtual-mouse');if(c)c.style.transform='translate(-4px, -2px) scale(0.9)';})()`).catch(() => {});
+
+  const steps = 16;
+  const stepMs = Math.min(70, Math.max(30, 950 / steps));
+  let selecting = true;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const x = x0 + (x1 - x0) * t + between(-3, 3);
+    const y = y0 + (y1 - y0) * t;
+    const selected = (await page
+      .evaluate(
+        ({ sx, sy, x, y }) => {
+          const c = document.getElementById('playwright-virtual-mouse');
+          if (c) {
+            c.style.left = x.toFixed(1) + 'px';
+            c.style.top = y.toFixed(1) + 'px';
+          }
+          const pre = (window as any).__autorecordDocCode as HTMLElement | null;
+          const sel = window.getSelection();
+          const from = (document as any).caretRangeFromPoint?.(sx, sy) as Range | null;
+          const to = (document as any).caretRangeFromPoint?.(x, y) as Range | null;
+          if (!pre || !sel || !from || !to || !pre.contains(to.startContainer)) return sel ? sel.toString().length : 0;
+          const range = document.createRange();
+          range.setStart(from.startContainer, from.startOffset);
+          range.setEnd(to.startContainer, to.startOffset);
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return sel.toString().length;
+        },
+        { sx: x0, sy: y0, x, y },
+      )
+      .catch(() => 0)) as number;
+    if (i === 4 && selected === 0) {
+      selecting = false;
+      break;
+    }
+    await sleep(jitter(stepMs, 0.35));
+  }
+  await sleep(between(50, 110));
+  await page.evaluate(`(function(){var c=document.getElementById('playwright-virtual-mouse');if(c)c.style.transform='translate(-4px, -2px) scale(1)';})()`).catch(() => {});
+
+  if (!selecting) {
+    // Nothing selectable here: circle the block twice instead, loosely.
+    const cx = box.x + Math.min(box.width / 2, 320);
+    const cy = box.y + box.height / 2;
+    const rx = Math.min(box.width / 2 - 10, 300);
+    const ry = Math.min(box.height / 2 + 6, 120);
+    for (let k = 0; k < 2; k++) {
+      for (let a = 0; a <= 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        await humanGlide(page, cx + rx * Math.cos(ang) + between(-6, 6), cy + ry * Math.sin(ang) + between(-4, 4), 6);
+      }
+    }
+  }
 }
 
 /**
@@ -182,6 +312,13 @@ export class RecordingEngine {
   private readonly videosDir: string;
   private readonly rootDir: string;
   private readonly tempVideoDir: string;
+  /**
+   * One Chromium for the whole run. Every take used to launch and tear down
+   * its own browser, which cost about five seconds per page off camera; the
+   * context (and with it the video) is still fresh per take, so the clips are
+   * unchanged. `shutdown()` closes it once the suite is done.
+   */
+  private browser?: Browser;
 
   constructor(rootDir: string) {
     this.rootDir = rootDir;
@@ -207,14 +344,17 @@ export class RecordingEngine {
     context: BrowserContext;
     page: Page;
   }> {
-    const browser = await chromium.launch({
-      headless: false,
-      args: [
-        '--start-maximized',
-        '--force-dark-mode',
-        '--background-color=#1e1e1e',
-      ],
-    });
+    if (!this.browser || !this.browser.isConnected()) {
+      this.browser = await chromium.launch({
+        headless: false,
+        args: [
+          '--start-maximized',
+          '--force-dark-mode',
+          '--background-color=#1e1e1e',
+        ],
+      });
+    }
+    const browser = this.browser;
 
     const context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
@@ -292,7 +432,8 @@ export class RecordingEngine {
       }
     }
 
-    await browser.close().catch(() => {});
+    // The browser stays up for the next take; see `shutdown()`.
+    void browser;
 
     // Playwright's raw chunk lands here before saveAs moves it out. Nothing
     // should survive the run; left alone it accumulated one stray .webm per
@@ -302,6 +443,64 @@ export class RecordingEngine {
     } catch {}
 
     return savedFilename;
+  }
+
+  /**
+   * Selects lines `from..to` of IDE view `idx` the way a person does: cursor
+   * to the start of the first line, press, drag down the lines, release. The
+   * highlight follows the cursor line by line (window.selectIdeLines in the
+   * IDE template). Returns the milliseconds it took, so the caller can take
+   * them out of the dwell that follows. Falls back to painting the range at
+   * once if the lines cannot be found, so a take never loses its highlight.
+   */
+  private async dragSelectSnippet(page: Page, idx: number, from: number, to: number): Promise<number> {
+    const started = Date.now();
+    const rowBox = async (n: number) => {
+      const row = page.locator(`#ide-view-${idx} .code-line[data-line="${n}"] .line-content`);
+      return (await row.isVisible({ timeout: 1500 }).catch(() => false)) ? row.boundingBox() : null;
+    };
+    const first = await rowBox(from);
+    const lastVisible = await rowBox(to);
+    const paint = (upTo: number) =>
+      page.evaluate(`window.selectIdeLines && window.selectIdeLines(${idx}, ${from}, ${upTo})`).catch(() => {});
+
+    if (!first) {
+      await paint(to);
+      await humanGlide(page, 520, 360, 18);
+      return Date.now() - started;
+    }
+
+    // Press at the start of the first line.
+    await humanGlide(page, first.x + 6, first.y + first.height / 2, 18);
+    await sleep(between(60, 140));
+    await page.evaluate(`(function(){var c=document.getElementById('playwright-virtual-mouse');if(c)c.style.transform='translate(-4px, -2px) scale(0.9)';})()`).catch(() => {});
+    await paint(from);
+
+    // Drag down: one visual step per line, faster on long ranges, a little
+    // uneven like a hand on a mouse. Whole selection bounded at ~1.2s.
+    const lines = Math.max(1, to - from);
+    const stepMs = Math.min(45, Math.max(14, 1100 / lines));
+    const bottom = lastVisible ? lastVisible.y + lastVisible.height / 2 : first.y + lines * first.height;
+    for (let n = from + 1; n <= to; n++) {
+      const t = (n - from) / lines;
+      const y = first.y + first.height / 2 + (bottom - first.y - first.height / 2) * t;
+      const x = first.x + 6 + Math.min(240, (n - from) * 9) + between(-3, 3);
+      await page.evaluate(`(function(){var c=document.getElementById('playwright-virtual-mouse');if(c){c.style.left='${x.toFixed(1)}px';c.style.top='${y.toFixed(1)}px';}})()`).catch(() => {});
+      await paint(n);
+      await sleep(jitter(stepMs, 0.35));
+    }
+
+    // Release, and leave the cursor resting on the selection.
+    await sleep(between(50, 110));
+    await page.evaluate(`(function(){var c=document.getElementById('playwright-virtual-mouse');if(c)c.style.transform='translate(-4px, -2px) scale(1)';})()`).catch(() => {});
+    return Date.now() - started;
+  }
+
+  /** Closes the shared browser. Call once, after the last take. */
+  async shutdown(): Promise<void> {
+    const browser = this.browser;
+    this.browser = undefined;
+    if (browser) await browser.close().catch(() => {});
   }
 
   /**
@@ -340,45 +539,39 @@ export class RecordingEngine {
       // Scrolling is the part that must wait: a hydration remount snaps the
       // page back to the top mid-scroll. Start the wait now and let the intro
       // play over it rather than stalling on a frozen frame.
-      const hydration = waitForHydration(page);
+      const hydration = waitForHydration(page, 15000);
 
       // Crisp pause so viewer registers the doc title, then glide straight into reading
       await sleep(500);
       await humanGlide(page, 960, 380, 16);
 
       if (!(await hydration)) {
-        console.warn(`   ⚠️ Doc page hydration not observed within 8s; scrolling anyway.`);
+        console.warn(`   ⚠️ Doc page hydration not observed within 15s; scrolling anyway.`);
       }
 
-      // Smooth scrolling down doc page (~75% depth to reveal first code block without overscroll).
-      console.log(`   Smooth scrolling down doc page...`);
-      await humanScrollDown(page, 1600, 3200);
-
-      // Find the visible code block on screen and glide cursor over it
-      const visibleCodePos = (await page.evaluate(`
-        (function() {
-          var pres = document.querySelectorAll('${SELECTORS.docCodeBlock}');
-          for (var i = 0; i < pres.length; i++) {
-            var r = pres[i].getBoundingClientRect();
-            if (r.height > 60 && r.top >= 120 && r.top <= window.innerHeight - 200) {
-              return {
-                x: r.left + Math.min(r.width / 2, 400),
-                y: r.top + Math.min(r.height / 3, 70),
-              };
-            }
-          }
-          return null;
-        })()
-      `)) as { x: number; y: number } | null;
-
-      if (visibleCodePos) {
-        await humanGlide(page, visibleCodePos.x, visibleCodePos.y, 20);
+      // Skim the whole page to the bottom in wheel bursts, so the clip shows
+      // all of the doc, then come back up to its first code block.
+      console.log(`   Skimming the doc page to the bottom...`);
+      await humanScrollDown(page, 20000, 4500, { toBottom: true });
+      // A late hydration remount resets the scroller to the top. If that
+      // happened under the skim, do it once more now that the page is settled.
+      if ((await docScrollTop(page)) < 200) {
+        console.log(`   Page snapped back to the top (late hydration); skimming again...`);
+        await pause(400);
+        await humanScrollDown(page, 20000, 4500, { toBottom: true });
+      }
+      await pause(500);
+      const codeBox = await scrollDocCodeBlockIntoView(page);
+      if (codeBox) {
+        // Select the snippet on the doc page with the cursor -- the same
+        // gesture the IDE step makes on the project file a moment later, so
+        // the two read as "this code, in our file".
+        await dragSelectDocCode(page, codeBox);
       } else {
         await humanGlide(page, 650, 450, 18);
       }
-
-      // Reading pause on the doc code snippet
-      await pause(2000);
+      // A beat on the selected snippet before switching apps.
+      await pause(900);
 
       console.log(`   🖱️ Switching to ${nextApp} via Windows 11 Taskbar...`);
       await clickTaskbarApp(page, nextApp);
@@ -447,21 +640,21 @@ export class RecordingEngine {
         await sleep(idx > 0 && !opts.clickTabs ? 500 : 300);
       }
 
-      // Scroll & highlight -- scoped to the tab that is now active.
+      // Scroll, then select the snippet by hand -- scoped to the active tab.
       await humanScrollCodeViewport(page, tabs[idx].startLine, idx);
-      const line = page.locator(`#ide-view-${idx} .code-line.highlighted`).first();
-      const box = (await line.isVisible({ timeout: 2000 }).catch(() => false))
-        ? await line.boundingBox()
-        : null;
-      if (box) {
-        await humanGlide(page, box.x + Math.min(box.width / 2, 420), box.y + Math.min(box.height / 2, 30), 18);
-      } else {
-        await humanGlide(page, 520, 360, 18);
-      }
-      await pause(opts.dwellMs);
+      const dragMs = await this.dragSelectSnippet(page, idx, tabs[idx].startLine, tabs[idx].endLine);
+      // The drag is time spent looking at the code, so it comes out of the
+      // dwell rather than on top of it; the take stays the same length.
+      await pause(Math.max(600, opts.dwellMs - dragMs));
     }
 
-    await page.unroute(ideUrl).catch(() => {});
+    // Bounded, because unbounded it can hang the whole run. `unroute` waits for
+    // in-flight handlers of the route it removes, and after some doc pages one
+    // never settles: seen 4/4 on the Learning page, whose Loom embed is the one
+    // thing it has that the others don't. The IDE window is finished with by
+    // now either way, and a leftover handler on a URL nothing else requests is
+    // harmless.
+    await Promise.race([page.unroute(ideUrl).catch(() => {}), sleep(3000)]);
   }
 
   /**
@@ -508,7 +701,49 @@ export class RecordingEngine {
     // The route stays registered for the life of the page; unrouting keeps a
     // second terminal segment on the same page from being served the first
     // one's HTML.
-    await page.unroute(terminalUrl).catch(() => {});
+    // Bounded for the same reason as the IDE route above.
+    await Promise.race([page.unroute(terminalUrl).catch(() => {}), sleep(3000)]);
+  }
+
+  /**
+   * Closes a failed take on the evidence: the log file always, the terminal
+   * window when the page can still be driven. Bounded, so a wedged page cannot
+   * turn a 60-second failure into a 5-minute one.
+   */
+  private async showFailureEvidence(
+    page: Page,
+    pageId: string,
+    error: string,
+    consoleEntries: ConsoleEntry[],
+    logs: LogSource[],
+    logsDir: string,
+  ): Promise<void> {
+    let evidence;
+    try {
+      evidence = buildFailureEvidence({ pageId, error, consoleEntries, logs });
+      const file = writeFailureLog(logsDir, evidence);
+      console.log(`   📝 Failure evidence: ${file}`);
+    } catch (e) {
+      console.warn(`   Evidence note: could not write the error log: ${e}`);
+      return;
+    }
+    if (page.isClosed()) return;
+    try {
+      await Promise.race([
+        (async () => {
+          await sleep(800);
+          await this.playCastInTerminal(page, {
+            cast: evidenceCast(evidence),
+            title: `Error console — ${pageId}`,
+          });
+        })(),
+        sleep(20_000).then(() => {
+          throw new Error('evidence terminal did not finish in 20s');
+        }),
+      ]);
+    } catch (e) {
+      console.warn(`   Evidence note: terminal not shown on camera: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   /**
@@ -623,6 +858,11 @@ export class RecordingEngine {
     let finalSavedFilename = '';
     const warnings: string[] = [];
 
+    // Where the server logs stand as this take begins. If it fails, the
+    // evidence shown is this page's slice of the logs, not the whole run's.
+    const logsDir = join(this.videosDir, 'logs');
+    const logSources: LogSource[] = snapshotLogOffsets(logsDir);
+
     /** A step that renders the thing under test failed -- the video is not usable. */
     const fail = (message: string): void => {
       if (!recordError) recordError = message;
@@ -668,12 +908,12 @@ export class RecordingEngine {
         );
       } catch (e) {
         const detail = e instanceof ServiceStartError ? `\n${e.tail}` : '';
-        return {
-          success: false,
-          filename: '',
-          error: `Dev server failed to start: ${e instanceof Error ? e.message : String(e)}${detail}`,
-          warnings: [],
-        };
+        const error = `Dev server failed to start: ${e instanceof Error ? e.message : String(e)}${detail}`;
+        // No browser to film this in; the log file is the only evidence.
+        try {
+          writeFailureLog(logsDir, buildFailureEvidence({ pageId: config.id, error, logs: logSources }));
+        } catch {}
+        return { success: false, filename: '', error, warnings: [] };
       }
     }
 
@@ -844,6 +1084,26 @@ export class RecordingEngine {
       console.error(`❌ Recording error for ${config.id}:`, recordError);
     } finally {
       console_?.stop();
+
+      // The app throwing is a failure, not a footnote. It used to become one
+      // warning line, so a page that crashed mid-take still reported PASS*.
+      const breaking = distinctErrors(breakingErrors(console_?.entries ?? []));
+      if (!recordError && breaking.length > 0) {
+        recordError =
+          `The app threw during the take (${breaking.length} distinct error(s)), first: ${breaking[0]}`;
+        recordSuccess = false;
+        console.error(`\n❌ [Page error on ${config.id}]: ${recordError}\n`);
+      }
+
+      // A failed take ends with the person opening the terminal to read what
+      // went wrong: the diagnosed error, the browser console, and this page's
+      // slice of the server logs, scrolled to the line that explains it. The
+      // same text goes to videos/logs/<id>.error.log. Never lets an evidence
+      // problem hide the original failure.
+      if (recordError) {
+        await this.showFailureEvidence(page, config.id, recordError, console_?.entries ?? [], logSources, logsDir);
+      }
+
       finalSavedFilename = await this.closeStage(
         browser,
         context,

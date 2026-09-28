@@ -10,6 +10,84 @@ export interface HealthCheckResult {
 const FRONTEND_BASE_URL = PROJECT.frontendUrl;
 const BACKEND_BASE_URL = PROJECT.backendUrl;
 
+/** How long a service gets to answer before the pre-flight calls it dead. */
+const READY_TIMEOUT_MS = 30000;
+
+interface ProbeTarget {
+  url: string;
+  headers?: Record<string, string>;
+}
+
+/**
+ * Every way one `localhost` URL can actually be reached.
+ *
+ * `localhost` is two addresses and a dev server binds only one of them: the
+ * Angular server listens on `[::1]` alone, while Node's fetch resolves
+ * `localhost` to `127.0.0.1` and gets a refusal - so a server a browser opens
+ * fine probes as dead. Both literals are tried, carrying `Host: localhost:<port>`
+ * because Angular's SSRF guard rejects a bracketed-IPv6 Host outright ("Header
+ * host with value [::1]:4200 is not allowed"), which is a *response* and would
+ * otherwise read as healthy.
+ *
+ * `ci/automate.mjs` has carried this in its own waits for some time. This
+ * pre-flight did not, so on 2026-09-21 an Agno-angular shard whose frontend
+ * answered only on `[::1]` aborted before launching a browser and filmed
+ * nothing, while the consolidate step still reported green over 6 clips
+ * instead of 9.
+ *
+ * Non-localhost URLs are returned untouched: 127.0.0.1 needs no help.
+ */
+function probeTargets(url: string): ProbeTarget[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [{ url }];
+  }
+  if (parsed.hostname !== 'localhost') return [{ url }];
+
+  const headers = { host: parsed.host };
+  const swap = (literal: string): ProbeTarget => {
+    const swapped = new URL(parsed.toString());
+    swapped.hostname = literal;
+    return { url: swapped.toString(), headers };
+  };
+  return [{ url }, swap('127.0.0.1'), swap('[::1]')];
+}
+
+/**
+ * Poll every address for `url` until one answers or the deadline passes.
+ *
+ * One attempt was the other half of the same bug: the frontend got a single
+ * 3s shot, so a dev server still compiling its first route read as down.
+ */
+async function waitForService(
+  url: string,
+  timeoutMs: number = READY_TIMEOUT_MS,
+): Promise<{ ok: boolean; error?: string }> {
+  const targets = probeTargets(url);
+  const deadline = Date.now() + timeoutMs;
+  let lastError = `Connection refused on ${url}`;
+
+  for (;;) {
+    for (const target of targets) {
+      try {
+        const res = await fetch(target.url, {
+          headers: target.headers,
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok || res.status < 500) return { ok: true };
+        lastError = `HTTP ${res.status} from ${target.url}`;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message) lastError = message;
+      }
+    }
+    if (Date.now() >= deadline) return { ok: false, error: lastError };
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
 /** Pre-flight check that both this project's services are up. */
 export async function checkServicesHealth(): Promise<HealthCheckResult> {
   const result: HealthCheckResult = {
@@ -17,34 +95,21 @@ export async function checkServicesHealth(): Promise<HealthCheckResult> {
     backendOk: false,
   };
 
-  // Check Frontend
-  try {
-    const res = await fetch(`${FRONTEND_BASE_URL}/`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    result.frontendOk = res.ok || res.status < 500;
-  } catch (err: unknown) {
-    const errMessage = err instanceof Error ? err.message : String(err);
-    result.frontendError = errMessage || `Connection refused on ${FRONTEND_BASE_URL}`;
-  }
+  const frontend = await waitForService(`${FRONTEND_BASE_URL}/`);
+  result.frontendOk = frontend.ok;
+  if (!frontend.ok) result.frontendError = frontend.error;
 
-  // Check Backend
-  try {
-    const res = await fetch(`${BACKEND_BASE_URL}${PROJECT.backendHealthPath}`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    result.backendOk = res.ok || res.status < 500;
-  } catch (err: unknown) {
-    // Fallback check to /docs or root
-    try {
-      const resDocs = await fetch(`${BACKEND_BASE_URL}/docs`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      result.backendOk = resDocs.ok || resDocs.status < 500;
-    } catch {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      result.backendError = errMessage || `Connection refused on ${BACKEND_BASE_URL}`;
-    }
+  const backend = await waitForService(
+    `${BACKEND_BASE_URL}${PROJECT.backendHealthPath}`,
+  );
+  if (backend.ok) {
+    result.backendOk = true;
+  } else {
+    // Some backends serve no health path but do serve docs. Short deadline:
+    // the one above has already waited out anything slow to boot.
+    const docs = await waitForService(`${BACKEND_BASE_URL}/docs`, 2000);
+    result.backendOk = docs.ok;
+    if (!docs.ok) result.backendError = backend.error;
   }
 
   return result;

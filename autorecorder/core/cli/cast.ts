@@ -21,6 +21,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import { redactText } from './redact';
+
 export type CastEventCode = 'o' | 'i';
 
 /** `[elapsedSeconds, code, data]` — elapsed is relative to the header timestamp. */
@@ -73,9 +75,18 @@ export class CastRecorder {
     return Number(((Date.now() - this.startedAt) / 1000 + this.offset).toFixed(6));
   }
 
-  /** Terminal output, exactly as the PTY emitted it — escape sequences included. */
+  /**
+   * Terminal output as the PTY emitted it — escape sequences included, minus
+   * anything `redactText` recognises as a credential.
+   *
+   * Masked here, at the single sink, rather than at save or render time: a
+   * secret that never enters the event list cannot be left behind by a code
+   * path that forgets to scrub. `PtySession` keeps its own unmasked copy of
+   * the stream for prompt matching (`session.ts`), so redaction cannot break a
+   * `waitFor` — the driver and the camera see different text on purpose.
+   */
   output(data: string): void {
-    this.events.push([this.elapsed(), 'o', data]);
+    this.events.push([this.elapsed(), 'o', redactText(data)]);
   }
 
   /**
@@ -112,7 +123,7 @@ export class CastRecorder {
    * off the rails at step 7.
    */
   input(data: string): void {
-    this.events.push([this.elapsed(), 'i', data]);
+    this.events.push([this.elapsed(), 'i', redactText(data)]);
   }
 
   get eventCount(): number {
@@ -152,10 +163,15 @@ export function readCast(filePath: string): Cast {
     throw new Error(`Unsupported cast version ${header.version} in ${filePath}`);
   }
 
+  // Redacted on the way in as well as on the way out. Casts captured before
+  // `redact.ts` existed still hold a live auth URL and the operator's email,
+  // and those files are the input to every future render — so the masking has
+  // to happen here too, or the first video rendered from an old cast publishes
+  // what the new capture path would have caught.
   const events: CastEvent[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const parsed = JSON.parse(lines[i]) as CastEvent;
-    events.push(parsed);
+    const [time, code, data] = JSON.parse(lines[i]) as CastEvent;
+    events.push([time, code, redactText(data)]);
   }
   return { header, events };
 }

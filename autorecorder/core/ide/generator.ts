@@ -114,8 +114,15 @@ function getFileIcon(ext: string): string {
   if (isPython) {
     return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M11.9 2c-4.4 0-4.1 1.9-4.1 1.9l.01 2h4.2v.6H5.8S2 6.1 2 10.6s3.3 4.3 3.3 4.3h2v-2.8s-.1-3.3 3.3-3.3h5.7s3.2.1 3.2-3.1-3.2-3.7-7.6-3.7z" fill="#3776ab"/><path d="M12.1 22c4.4 0 4.1-1.9 4.1-1.9l-.01-2h-4.2v-.6h6.2s3.8.4 3.8-4.1-3.3-4.3-3.3-4.3h-2v2.8s.1 3.3-3.3 3.3H7.7s-3.2-.1-3.2 3.1 3.2 3.7 7.6 3.7z" fill="#ffd43b"/><circle cx="9.5" cy="4.5" r=".7" fill="#fff"/><circle cx="14.5" cy="19.5" r=".7" fill="#fff"/></svg>`;
   }
+  if (ext === 'tsx' || ext === 'jsx') {
+    // Seti's React atom, the icon VS Code shows for .tsx.
+    return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#519aba" stroke-width="1.4"><ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/><circle cx="12" cy="12" r="1.6" fill="#519aba" stroke="none"/></svg>`;
+  }
+  if (ext === 'js' || ext === 'mjs' || ext === 'cjs') {
+    return `<svg width="15" height="15" viewBox="0 0 24 24"><text x="2" y="18" fill="#cbcb41" font-family="Segoe UI, sans-serif" font-size="13" font-weight="bold">JS</text></svg>`;
+  }
   if (isTsx) {
-    return `<svg width="15" height="15" viewBox="0 0 24 24" fill="#3178c6"><rect width="24" height="24" rx="3"/><text x="4" y="17" fill="#fff" font-family="Segoe UI, sans-serif" font-size="12" font-weight="bold">TS</text></svg>`;
+    return `<svg width="15" height="15" viewBox="0 0 24 24"><text x="2" y="18" fill="#519aba" font-family="Segoe UI, sans-serif" font-size="13" font-weight="bold">TS</text></svg>`;
   }
   if (isJson) {
     return `<svg width="15" height="15" viewBox="0 0 24 24" fill="#cbcb41"><text x="3" y="17" fill="#cbcb41" font-family="Consolas, monospace" font-size="14" font-weight="bold">{ }</text></svg>`;
@@ -152,9 +159,16 @@ export async function generateIdeHtml(
   const tabSources = await Promise.all(
     tabsList.map(async (tab) => {
       const fullPath = join(rootDir, tab.filePath);
-      const raw = existsSync(fullPath)
-        ? readFileSync(fullPath, 'utf-8')
-        : '// File not found';
+      const missing = !existsSync(fullPath);
+      // Said out loud. A missing ideFile used to render one grey comment line
+      // and nothing else, which films as an empty editor -- indistinguishable
+      // from a short file. That is how every generated VERSIONS.md reached the
+      // demos blank: gitignored, not written on the --skip-install path, and
+      // no complaint from anywhere in the pipeline.
+      if (missing) {
+        console.warn(`   ⚠️  IDE file missing: ${tab.filePath} -- the clip will show an empty editor.`);
+      }
+      const raw = missing ? '// File not found' : readFileSync(fullPath, 'utf-8');
       // Normalize CRLF so a stray \r never lands inside a rendered code line.
       const code = raw.replace(/\r\n/g, '\n');
       const ext = basename(tab.filePath).split('.').pop() ?? '';
@@ -177,7 +191,7 @@ export async function generateIdeHtml(
           onclick="window.switchIdeTab(${idx})"
           style="${
             isActive
-              ? 'background:#1e1e1e;border-top:1px solid #007acc;color:#ffffff;'
+              ? 'background:#1f1f1f;border-top:1px solid #0078d4;color:#ffffff;'
               : 'background:#181818;border-top:1px solid transparent;color:#9d9d9d;'
           }"
         >
@@ -207,20 +221,18 @@ export async function generateIdeHtml(
           const isCaretLine = lineNum === tab.startLine;
           const highlightedContent = highlightedLines[lIdx] ?? '&nbsp;';
 
-          const lineClass = isHighlighted
-            ? 'code-line highlighted'
-            : 'code-line';
-          const numClass = isHighlighted ? 'line-num highlighted' : 'line-num';
-          const textClass = isHighlighted
-            ? 'line-content highlighted'
-            : 'line-content';
-
+          // The snippet is marked, not yet highlighted: the recorder selects
+          // it on camera by dragging the cursor down the lines, adding the
+          // `highlighted` classes as it goes (window.selectIdeLines). A range
+          // already painted when the window fades in read as a slide, not as
+          // a person finding the code.
+          const snippetAttr = isHighlighted ? ' data-snippet="1"' : '';
           const caretHtml = isCaretLine ? '<span class="vs-caret"></span>' : '';
 
           return `
-            <div class="${lineClass}">
-              <div class="${numClass}">${lineNum}</div>
-              <div class="${textClass}"><span>${highlightedContent}${caretHtml}</span></div>
+            <div class="code-line" data-line="${lineNum}"${snippetAttr}>
+              <div class="line-num">${lineNum}</div>
+              <div class="line-content"><span>${highlightedContent}${caretHtml}</span></div>
             </div>
           `;
         })
@@ -250,11 +262,11 @@ export async function generateIdeHtml(
               ${
                 isLast
                   ? getFileIcon(ext)
-                  : '<span style="color:#dcb67a;font-size:11px;">📁</span>'
+                  : ''
               }
               <span>${escapeHtml(part)}</span>
             </span>
-            ${!isLast ? '<span class="breadcrumb-sep">&gt;</span>' : ''}
+            ${!isLast ? '<span class="breadcrumb-sep">&rsaquo;</span>' : ''}
           `;
         })
         .join('');
@@ -301,8 +313,7 @@ export async function generateIdeHtml(
     } else {
       treeNodes.push(`
         <div class="tree-node ${indentClass} folder-node">
-          <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#858585" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
-          <span class="folder-icon">📁</span>
+          <svg class="chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#c5c5c5" stroke-width="1.3"><path d="m4 6 4 4 4-4"/></svg>
           <span class="folder-name">${escapeHtml(part)}</span>
         </div>
       `);
@@ -343,9 +354,9 @@ export async function generateIdeHtml(
       width: 100vw;
       height: 100vh;
       overflow: hidden;
-      background-color: #1e1e1e;
+      background-color: #1f1f1f;
       color: #cccccc;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
       user-select: none;
       -webkit-user-select: none;
     }
@@ -460,7 +471,7 @@ export async function generateIdeHtml(
     .activity-group {
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 6px;
       align-items: center;
     }
     .activity-icon {
@@ -536,31 +547,37 @@ export async function generateIdeHtml(
     .tree-node {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 3px 6px;
+      gap: 5px;
+      padding: 0 6px;
       color: #cccccc;
-      border-radius: 3px;
+      border-radius: 0;
       cursor: pointer;
       position: relative;
     }
-    .tree-node.pl-1 { padding-left: 18px; }
-    .tree-node.pl-2 { padding-left: 30px; }
-    .tree-node.pl-3 { padding-left: 42px; }
-    .tree-node.pl-4 { padding-left: 54px; }
+    .tree-node.pl-1 { padding-left: 14px; }
+    .tree-node.pl-2 { padding-left: 22px; }
+    .tree-node.pl-3 { padding-left: 30px; }
+    .tree-node.pl-4 { padding-left: 38px; }
+    /* Files sit under the chevron column, the way the real tree indents them. */
+    .tree-node.file-node { padding-left: 22px; }
+    .tree-node.file-node.pl-1 { padding-left: 30px; }
+    .tree-node.file-node.pl-2 { padding-left: 38px; }
+    .tree-node.file-node.pl-3 { padding-left: 46px; }
+    .tree-node.file-node.pl-4 { padding-left: 54px; }
     .tree-node.active-file {
       background: #04395e;
+      outline: 1px solid #0078d4;
+      outline-offset: -1px;
       color: #ffffff;
-      font-weight: 500;
     }
-    .folder-name { color: #cccccc; font-weight: 500; }
-    .folder-icon { font-size: 12px; }
+    .folder-name { color: #cccccc; }
     .file-icon { display: flex; align-items: center; }
     /* Editor Area */
     .editor-pane {
       display: flex;
       flex-direction: column;
       flex: 1;
-      background: #1e1e1e;
+      background: #1f1f1f;
       overflow: hidden;
       position: relative;
     }
@@ -606,8 +623,8 @@ export async function generateIdeHtml(
       color: #858585;
     }
     .breadcrumbs-bar {
-      height: 24px;
-      background: #1e1e1e;
+      height: 22px;
+      background: #1f1f1f;
       border-bottom: 1px solid #2b2b2b;
       padding: 0 16px;
       display: flex;
@@ -626,7 +643,9 @@ export async function generateIdeHtml(
       color: #cccccc;
     }
     .breadcrumb-sep {
-      color: #555555;
+      color: #6f6f6f;
+      font-size: 14px;
+      line-height: 1;
     }
     /* Code Viewer */
     .editor-body {
@@ -639,8 +658,8 @@ export async function generateIdeHtml(
       flex: 1;
       overflow-y: auto;
       padding: 10px 0 60px 0;
-      font-family: 'Cascadia Code', Consolas, 'Fira Code', 'Courier New', monospace;
-      font-size: 13.5px;
+      font-family: Consolas, 'Cascadia Code', 'Cascadia Mono', 'Fira Code', 'DejaVu Sans Mono', 'Liberation Mono', 'Droid Sans Mono', monospace;
+      font-size: 14px;
       line-height: 22px;
       -webkit-font-smoothing: antialiased;
     }
@@ -659,7 +678,7 @@ export async function generateIdeHtml(
      * it, and the code visibly stepped in and out at the range edges.
      */
     .code-line.highlighted {
-      box-shadow: inset 3px 0 0 0 #007acc;
+      /* A real selection has no gutter marker; the fill on the text is it. */
     }
     .line-num {
       width: 58px;
@@ -671,8 +690,7 @@ export async function generateIdeHtml(
       font-size: 12px;
     }
     .line-num.highlighted {
-      color: #ffffff;
-      font-weight: bold;
+      color: #cccccc;
     }
     .line-content {
       flex: 1;
@@ -681,7 +699,7 @@ export async function generateIdeHtml(
       padding-right: 24px;
     }
     .line-content.highlighted {
-      color: #ffffff;
+      color: #d4d4d4;
     }
     /*
      * Hug the glyphs, the way an editor selection does, instead of flooding the
@@ -690,8 +708,8 @@ export async function generateIdeHtml(
      * indentation, which is part of the token stream.
      */
     .line-content.highlighted > span {
-      background: rgba(38, 79, 120, 0.75);
-      border-radius: 2px;
+      background: #264f78;
+      border-radius: 0;
       box-decoration-break: clone;
       -webkit-box-decoration-break: clone;
     }
@@ -732,8 +750,9 @@ export async function generateIdeHtml(
     /* Status Bar */
     .statusbar {
       height: 22px;
-      background: #007acc;
-      color: #ffffff;
+      background: #181818;
+      border-top: 1px solid #2b2b2b;
+      color: #cccccc;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -797,50 +816,66 @@ export async function generateIdeHtml(
       <!-- Activity Bar -->
       <aside class="activity-bar">
         <div class="activity-group">
-          <!-- Explorer (Active) -->
+          <!-- Explorer (Active): codicon "files", two stacked pages -->
           <div class="activity-icon active">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <path d="M4 4h6l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+              <path d="M8.5 3.5h7l4 4v11a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1z" />
+              <path d="M15.5 3.5v4h4" />
+              <path d="M6 7.5H5a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h9" />
             </svg>
           </div>
           <!-- Search -->
           <div class="activity-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.35-4.35" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="13.5" cy="10.5" r="6" />
+              <path d="M9.3 14.7 4 20" stroke-linecap="round" />
             </svg>
           </div>
           <!-- Source Control -->
           <div class="activity-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <circle cx="18" cy="18" r="3" />
-              <circle cx="6" cy="6" r="3" />
-              <path d="M18 15V9a9 9 0 0 0-9-9" />
-              <path d="M6 9v12" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="7" cy="6" r="2.2" />
+              <circle cx="7" cy="18" r="2.2" />
+              <circle cx="17" cy="9" r="2.2" />
+              <path d="M7 8.2v7.6" />
+              <path d="M17 11.2c0 3-2.5 3.6-5 4.1-2 .4-3.5 1-3.8 2.5" />
             </svg>
             <span class="badge">1</span>
           </div>
-          <!-- Run & Debug -->
+          <!-- Run & Debug: codicon "debug-alt", play with a bug -->
           <div class="activity-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <path d="M5 3l14 9-14 9V3z" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+              <path d="M5.5 4.5v15l7.5-4.6V9.1z" />
+              <path d="M13 12.5l6.5-4V19z" />
+              <path d="M11 4.5 19 9.5" />
+              <circle cx="17.5" cy="16.5" r="2.6" fill="#181818" />
+              <path d="M17.5 13.9v-1.2M15.3 15l-1.2-.6M19.7 15l1.2-.6M15.3 18l-1.2.6M19.7 18l1.2.6M17.5 19.1v1.2" stroke-linecap="round" />
             </svg>
           </div>
-          <!-- Extensions -->
+          <!-- Extensions: three squares and one lifted away -->
           <div class="activity-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <rect x="3" y="3" width="7" height="7" />
-              <rect x="14" y="3" width="7" height="7" />
-              <rect x="14" y="14" width="7" height="7" />
-              <rect x="3" y="14" width="7" height="7" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+              <rect x="4" y="10" width="5.5" height="5.5" />
+              <rect x="9.5" y="15.5" width="5.5" height="5.5" />
+              <rect x="4" y="15.5" width="5.5" height="5.5" />
+              <rect x="13.5" y="3" width="6.5" height="6.5" />
             </svg>
           </div>
         </div>
         <div class="activity-group">
+          <!-- Account -->
           <div class="activity-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="8.5" />
+              <circle cx="12" cy="10" r="3" />
+              <path d="M6.3 18.2c1.2-2.3 3.2-3.4 5.7-3.4s4.5 1.1 5.7 3.4" />
+            </svg>
+          </div>
+          <!-- Manage (gear) -->
+          <div class="activity-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="2.8" />
+              <path d="M12 3.5l1.3 2.2 2.5-.6.7 2.5 2.5.7-.6 2.5 2.1 1.2-2.1 1.3.6 2.5-2.5.7-.7 2.5-2.5-.6L12 20.5l-1.3-2.1-2.5.6-.7-2.5-2.5-.7.6-2.5L3.5 12l2.1-1.2-.6-2.5 2.5-.7.7-2.5 2.5.6z" />
             </svg>
           </div>
         </div>
@@ -912,14 +947,30 @@ export async function generateIdeHtml(
   </div>
 
   <script>
+    // Paints the selection over lines from..to of view idx, the way a drag
+    // would: called once per line as the cursor passes it.
+    window.selectIdeLines = function(idx, from, to) {
+      var view = document.getElementById('ide-view-' + idx);
+      if (!view) return;
+      var rows = view.querySelectorAll('.code-line[data-line]');
+      for (var i = 0; i < rows.length; i++) {
+        var n = Number(rows[i].getAttribute('data-line'));
+        var on = n >= from && n <= to;
+        rows[i].classList.toggle('highlighted', on);
+        var num = rows[i].querySelector('.line-num');
+        var txt = rows[i].querySelector('.line-content');
+        if (num) num.classList.toggle('highlighted', on);
+        if (txt) txt.classList.toggle('highlighted', on);
+      }
+    };
     window.switchIdeTab = function(idx) {
       var tabs = document.querySelectorAll('.tab');
       var views = document.querySelectorAll('.editor-body-view');
       for (var i = 0; i < tabs.length; i++) {
         if (i === idx) {
           tabs[i].classList.add('active');
-          tabs[i].style.background = '#1e1e1e';
-          tabs[i].style.borderTop = '1px solid #007acc';
+          tabs[i].style.background = '#1f1f1f';
+          tabs[i].style.borderTop = '1px solid #0078d4';
           tabs[i].style.color = '#ffffff';
         } else {
           tabs[i].classList.remove('active');

@@ -1,0 +1,90 @@
+name: PR checks
+
+# The cheap half of the nightly's stage 2, run where it can still change a
+# decision: on the pull request, before merge.
+#
+# Until now typecheck, the recorder's unit tests, the core/ manifest check and
+# the README freshness check ran only inside daily-recorder.yml -- after the
+# drift gate, on a 05:27 UTC schedule, with nobody watching. A PR that broke
+# any of them merged clean and surfaced the next morning as a red shard.
+#
+# Nothing here needs a secret, a browser, a server or the docs site, so it
+# finishes in a few minutes and cannot flake on anything external. It installs
+# the COMMITTED lockfiles (npm ci), unlike the nightly, which re-resolves on
+# purpose: a PR is judged against what the repo pins, the nightly against what
+# upstream shipped. Both answers matter; they are different questions.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck, unit tests, manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/package-lock.json
+            autorecorder/package-lock.json
+
+      - name: Install (committed lockfiles)
+        run: |
+          set -euo pipefail
+          npm --prefix frontend ci --no-audit --no-fund
+          npm --prefix autorecorder ci --no-audit --no-fund
+
+      # Report-only, as in the nightly: the demo pages mirror doc snippets, and
+      # a snippet that no longer typechecks against the newest CopilotKit is a
+      # finding about the docs, not a reason to block an unrelated PR. The
+      # errors land in the step summary; the step stays green.
+      - name: Typecheck frontend (report only)
+        run: |
+          set +e
+          npx --prefix frontend tsc --noEmit -p frontend/tsconfig.json > typecheck-frontend.txt 2>&1
+          FE=$?
+          set -e
+          cat typecheck-frontend.txt
+          if [ "$FE" = "0" ]; then
+            echo "- frontend typecheck: **clean**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "- frontend typecheck: **$(grep -c 'error TS' typecheck-frontend.txt) error(s)** (report only)"
+              echo
+              echo '```'
+              grep 'error TS' typecheck-frontend.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Typecheck autorecorder
+        if: always()
+        run: npx --prefix autorecorder tsc --noEmit -p autorecorder/tsconfig.json
+
+      - name: Autorecorder unit tests
+        if: always()
+        run: npm --prefix autorecorder test
+
+      - name: Autorecorder core/ matches CORE_MANIFEST.json
+        if: always()
+        run: npm --prefix autorecorder run core:check
+
+
+      - name: Pipeline scripts parse
+        if: always()
+        run: |
+          set -euo pipefail
+          for f in ci/*.mjs ci/lib/*.mjs; do node --check "$f"; done

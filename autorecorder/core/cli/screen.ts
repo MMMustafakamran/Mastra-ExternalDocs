@@ -111,19 +111,39 @@ export function highlightedLabel(
 }
 
 /**
+ * Raw bytes read per visible character before stripping.
+ *
+ * A full-screen TUI can paint every cell of a frame with a styled blank: at
+ * 120x32 that is ~3,840 cells of `ESC[48;5;0m ESC[0m`, some 54 KB of escape
+ * codes for a screen that shows almost nothing. Sixteen times the visible
+ * window holds several such frames while keeping each poll's strip bounded.
+ */
+const RAW_PER_VISIBLE_CHAR = 16;
+
+/**
  * Does the tail of the stream contain this pattern?
  *
  * Matching is confined to a window at the end of the stream so that a prompt
  * which appeared and was answered minutes ago cannot satisfy a later wait. The
  * window is generous: enough to hold several full repaints of a long list, far
  * short of the whole session.
+ *
+ * The window is measured in *visible* text, after escape codes are stripped.
+ * Cut from the raw bytes first, a prompt followed by one frame's worth of
+ * styled padding can fall outside it while `lastLines`, which strips first,
+ * still shows it as the last thing on screen. A defensive fix with a test of
+ * its own: it did NOT cause the CI "App name" timeout on 2026-09-21. That was
+ * the CLI withholding its prompts under `CI=true`; see `INTERACTIVE_TUI_ENV`
+ * in `config/cli.config.ts`.
  */
 export function tailMatches(
   raw: string,
   pattern: string | RegExp,
   windowChars = 20000,
 ): boolean {
-  const text = toScreenText(raw.slice(-windowChars));
+  const text = toScreenText(raw.slice(-windowChars * RAW_PER_VISIBLE_CHAR)).slice(
+    -windowChars,
+  );
   if (typeof pattern === 'string') {
     return text.toLowerCase().includes(pattern.toLowerCase());
   }

@@ -21,7 +21,9 @@ function fakeScaffold(root: string): void {
       '# written by `copilotkit init`',
       'AGENT_URL=http://localhost:8000',
       'CPK_INTELLIGENCE_API_KEY=cpk_generated',
-      'OPENAI_MODEL=gpt-5.4-mini',
+      // Deliberately not a real model name: a bulk model rename must not make
+      // this value equal the seed's, or the test can no longer tell them apart.
+      'OPENAI_MODEL=model-from-cli',
       '',
     ].join('\n'),
   );
@@ -65,7 +67,7 @@ test('seeding merges into the CLI-generated .env instead of replacing it', () =>
     // Where both define a key, the seed wins and the generated value is gone —
     // not left behind as a duplicate for a dotenv parser to choose between.
     assert.match(env, /^OPENAI_MODEL=gpt-5.4-mini$/m);
-    assert.doesNotMatch(env, /gpt-5.4-mini/);
+    assert.doesNotMatch(env, /model-from-cli/);
 
     // node_modules is never carried into a copy: the install is the subject of
     // the test the copies exist for.

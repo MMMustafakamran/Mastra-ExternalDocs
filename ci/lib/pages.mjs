@@ -29,18 +29,11 @@ const PAGES_CONFIG = path.join(RECORDER_DIR, 'config', 'pages.config.ts');
  * the dispatch form.
  */
 export const PAGE_GROUPS = {
-  getting_started: ['quickstart', 'prebuilt-components'],
-  custom_look: ['slots', 'headless-ui', 'programmatic-control', 'inspector'],
-  generative_ui: ['display-only', 'interactive', 'tool-rendering', 'state-rendering'],
-  app_control: [
-    'frontend-tools',
-    'in-app-agent-read',
-    'in-app-agent-write',
-    'readables',
-    'auth',
-  ],
-  threads: ['threads-drawer', 'threads-headless', 'threads-lifecycle'],
-  backend: ['copilot-runtime', 'ag-ui'],
+  // The guide is one page with four recorded sections; one checkbox each.
+  quickstart: ['quickstart'],
+  tool_rendering: ['tool-rendering'],
+  frontend_tools: ['frontend-tools'],
+  human_in_the_loop: ['human-in-the-loop'],
 };
 
 export function readPageIds() {

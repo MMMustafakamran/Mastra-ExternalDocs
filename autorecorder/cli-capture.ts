@@ -12,7 +12,7 @@
  * because the default would scaffold a project and install four dependency
  * trees on someone who typed the command to see what it did.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CLI_DISTRIBUTION, CLI_FLOWS } from './config/cli.config';
@@ -24,6 +24,41 @@ import { hasInstalledTree, writeVersionsFile } from './core/cli/versions';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = join(__dirname, '..');
 const OUT_DIR = join(__dirname, 'casts');
+
+/**
+ * Checks whether a directory or its package.json was last modified before today (00:00:00 local time).
+ */
+function isOlderThanToday(dirPath: string): boolean {
+  try {
+    if (!existsSync(dirPath)) return false;
+    const stats = statSync(dirPath);
+    let latestMs = Math.max(stats.mtimeMs || 0, stats.ctimeMs || 0, stats.birthtimeMs || 0);
+
+    const pkgJson = join(dirPath, 'package.json');
+    if (existsSync(pkgJson)) {
+      const pkgStats = statSync(pkgJson);
+      latestMs = Math.max(latestMs, pkgStats.mtimeMs || 0, pkgStats.ctimeMs || 0, pkgStats.birthtimeMs || 0);
+    }
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    return latestMs < startOfToday.getTime();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deletes a project directory if it is older than today.
+ */
+function deleteIfOlderThanToday(dirPath: string, label: string): boolean {
+  if (existsSync(dirPath) && isOlderThanToday(dirPath)) {
+    console.log(`   🗑  ${label} is older than today — deleting for a fresh run...`);
+    rmSync(dirPath, { recursive: true, force: true });
+    return true;
+  }
+  return false;
+}
 
 /**
  * Exits explicitly rather than letting the process end on its own.
@@ -110,6 +145,11 @@ async function main(): Promise<void> {
   }
 
   if (args.includes('--distribute')) {
+    // Delete distributed targets older than today so distribute doesn't skip them
+    for (const target of CLI_DISTRIBUTION.targets) {
+      deleteIfOlderThanToday(join(ROOT, target), target);
+    }
+
     try {
       const results = distribute(CLI_DISTRIBUTION, {
         rootDir: ROOT,
@@ -145,6 +185,13 @@ async function main(): Promise<void> {
     console.error(`❌ No CLI flow matched: ${args.join(' ')}`);
     console.error(`   Known ids: ${CLI_FLOWS.map((f) => f.id).join(', ')}`);
     finish(1);
+  }
+
+  // If scaffolding is part of this run and the app folder is older than today,
+  // delete it so `copilotkit create` doesn't fail on an existing directory.
+  if (flows.some((f) => f.id === 'scaffold')) {
+    const sourceAbs = join(ROOT, CLI_DISTRIBUTION.source);
+    deleteIfOlderThanToday(sourceAbs, CLI_DISTRIBUTION.source);
   }
 
   const results: CliRunResult[] = [];

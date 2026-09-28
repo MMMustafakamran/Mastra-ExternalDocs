@@ -47,6 +47,21 @@ test('tailMatches only looks at the end of the stream', () => {
   assert.equal(tailMatches(filler + old, 'select A PROJECT'), true, 'string patterns are case-insensitive');
 });
 
+test('tailMatches measures its window in visible text, not escape codes', () => {
+  // The CopilotKit CLI's "App name" prompt, then a full-screen TUI padding
+  // every cell of a 120x32 frame with a styled blank. That is ~54 KB of escape
+  // codes after a prompt that is plainly the last thing on screen.
+  const prompt = 'App name\r\nNames your new app and its folder\r\n> my-app\r\n';
+  const padding = `${ESC}[48;5;0m ${ESC}[0m`.repeat(120 * 32);
+
+  assert.ok(lastLines(prompt + padding, 8).includes('App name'), 'the screen shows the prompt');
+  assert.equal(
+    tailMatches(prompt + padding, /App name/i),
+    true,
+    'a prompt on screen must satisfy the wait that is looking for it',
+  );
+});
+
 test('lastLines drops blank lines and keeps the last N', () => {
   const raw = 'a\n\n\nb\r\nc\n';
   assert.equal(lastLines(raw, 2), 'b\nc');

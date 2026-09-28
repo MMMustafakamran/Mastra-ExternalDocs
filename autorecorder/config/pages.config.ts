@@ -110,3 +110,6 @@ const PAGE_DEFS: PageDefinition[] = [
 ];
 
 export const PAGES = definePages(PAGE_DEFS);
+
+/** Pages kept registered (doctor, CI groups) but never recorded. id -> reason. */
+export const SKIP_RECORDING: Record<string, string> = {};

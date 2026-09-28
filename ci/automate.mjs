@@ -306,12 +306,8 @@ async function main() {
 
     // 3. Dependencies
     if (!skipInstall) {
-      runSync(
-        shouldRefresh ? 'uv sync --upgrade' : 'uv sync --prerelease=allow',
-        BACKEND_DIR,
-        'Syncing Backend Dependencies (uv sync)',
-      );
-
+      // mastra-server/ is a Node project (the page's own layout), not uv.
+      installNodeDeps(BACKEND_DIR, 'Installing Mastra Server Dependencies');
 
       installNodeDeps(FRONTEND_DIR, 'Installing Frontend Dependencies');
       installNodeDeps(RECORDER_DIR, 'Installing Autorecorder Dependencies');
@@ -328,7 +324,9 @@ async function main() {
       console.log('\n▶ [Step] Backend already running; reusing it.');
     } else {
       console.log('\n▶ [Step] Starting Backend Server...');
-      const backend = spawnServer('uv run --prerelease=allow main.py', BACKEND_DIR, 'backend.log');
+      // `mastra dev`, as `npm run agent` runs it, minus `--env ../.env`: the
+      // .env loaded above is inherited, and CI has no .env file to point at.
+      const backend = spawnServer('npx mastra dev', BACKEND_DIR, 'backend.log');
       backendProc = backend.proc;
       backendLog = backend.logPath;
     }

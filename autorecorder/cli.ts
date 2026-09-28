@@ -6,12 +6,13 @@ import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { PAGES } from './config/pages.config';
+import { PAGES, SKIP_RECORDING } from './config/pages.config';
 import { PROJECT } from './config/project.config';
 import { isCi } from './core/cli/ci-guard';
 import { checkServicesHealth } from './core/diagnostics';
 import { RecordingEngine } from './core/engine';
 import { runDoctor } from './core/doctor';
+import { prewarmDemoRoutes } from './core/prewarm';
 import { parseShard, selectPages } from './core/select';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -237,8 +238,16 @@ async function main(): Promise<void> {
       : [];
   const missingGenerated = [...notYetProduced, ...ciExcluded];
 
+  // Pages listed in SKIP_RECORDING stay registered (doctor, CI groups, the
+  // note) but are never recorded, by any selection, locally or in CI.
+  const notRecorded = PAGES.filter((p) => p.id in SKIP_RECORDING);
+  const recordable = PAGES.filter((p) => !(p.id in SKIP_RECORDING));
+  for (const p of notRecorded) {
+    console.log(`\n⏸️ Not recording ${p.id}: ${SKIP_RECORDING[p.id]}`);
+  }
+
   const idList = values.pages ?? values.only;
-  const { pages: targetPages, shard: applied } = selectPages(PAGES, {
+  const { pages: targetPages, shard: applied } = selectPages(recordable, {
     ids: idList ? String(idList).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
     page: values.page ? String(values.page) : pageWord,
     filter: values.filter ? String(values.filter) : undefined,
@@ -250,13 +259,24 @@ async function main(): Promise<void> {
 
   if (applied) {
     console.log(
-      `\n🧩 [Matrix Sharding]: Worker Shard ${applied.index}/${applied.total} -> Recording ${targetPages.length} pages (index ${applied.from + 1} to ${applied.to})`,
+      `\n🧩 [Matrix Sharding]: Worker Shard ${applied.index}/${applied.total} -> Recording ${targetPages.length} pages (positions ${applied.positions.join(', ')})`,
     );
   }
 
   if (targetPages.length === 0) {
     if (applied) {
       console.log(`\nℹ️ [Matrix Sharding]: No pages assigned to this worker shard. Exiting cleanly.`);
+      process.exit(0);
+    }
+    // Asking only for excluded pages is a no-op, not a bad selection: the ids
+    // are real, so exiting 1 here would fail a run that did exactly as told.
+    if (notRecorded.length > 0 && selectPages(PAGES, {
+      ids: idList ? String(idList).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      page: values.page ? String(values.page) : pageWord,
+      filter: values.filter ? String(values.filter) : undefined,
+      queries,
+    }).pages.length > 0) {
+      console.log(`\nℹ️ Everything selected is excluded from recording. Nothing to do.`);
       process.exit(0);
     }
     console.error(`❌ No matching page found for: ${rawArgs.join(' ') || '(nothing)'}`);
@@ -305,6 +325,8 @@ async function main(): Promise<void> {
   const results: PageResult[] = [];
   const suiteStartTime = Date.now();
 
+  await prewarmDemoRoutes(targetPages);
+
   for (const pageConfig of targetPages) {
     const pageStartTime = Date.now();
     const res = await engine.recordPage(pageConfig);
@@ -321,6 +343,8 @@ async function main(): Promise<void> {
       consoleErrors: res.consoleErrors,
     });
   }
+
+  await engine.shutdown();
 
   const totalDuration = ((Date.now() - suiteStartTime) / 1000).toFixed(1);
   const failedCount = results.filter((r) => !r.success).length;
@@ -360,9 +384,19 @@ async function main(): Promise<void> {
   console.log(`📁 Video files saved to: ${VIDEOS_DIR}`);
   console.log(`📄 Results: ${join(VIDEOS_DIR, RESULTS_FILE)}\n`);
 
-  if (failedCount > 0) {
-    process.exit(1);
-  }
+  // Both paths exit explicitly, and the success path is the one that matters.
+  //
+  // Returning from `main` leaves the process alive for as long as anything still
+  // holds a handle — a dev server's pipe, a Playwright transport — with the work
+  // finished, the summary printed and the results file written. It looks exactly
+  // like a recorder that froze, and on 2026-09-08 a passing demo sat like that
+  // for 24 minutes before anyone looked at the results file and saw it had
+  // finished in 153s. `cli-capture.ts` documents the same trap and guards it the
+  // same way.
+  //
+  // Failures never showed this, because `exit(1)` below was already explicit —
+  // which is why only *passing* runs appeared to hang.
+  process.exit(failedCount > 0 ? 1 : 0);
 }
 
 main().catch((err) => {

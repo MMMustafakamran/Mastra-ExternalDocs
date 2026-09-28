@@ -76,6 +76,18 @@ function keysToBytes(keys: CliKeyName[]): string {
  * (Python), LangGraph (JavaScript), …" is a usable bug report and "select
  * failed" is not.
  */
+/**
+ * Whether a highlighted row is the one a `select` step is walking towards.
+ *
+ * Exported for its tests: this predicate decides which Intelligence project a
+ * recording binds itself to, and getting it wrong is not visible in the video.
+ */
+export function rowMatches(row: string, label: string, exact?: boolean): boolean {
+  const a = row.toLowerCase().trim();
+  const b = label.toLowerCase().trim();
+  return exact ? a === b : a.includes(b);
+}
+
 async function runSelect(
   session: PtySession,
   step: CliStep,
@@ -94,7 +106,7 @@ async function runSelect(
 
     if (current) {
       if (seen[seen.length - 1] !== current) seen.push(current);
-      if (current.toLowerCase().includes(wanted)) {
+      if (rowMatches(current, select.label, select.exact)) {
         log(`      highlight on "${current}" after ${presses} × ${key}`);
         return { landedOn: current, keypresses: presses };
       }

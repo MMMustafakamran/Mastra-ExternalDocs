@@ -32,10 +32,12 @@ export interface ConsoleCapture {
   stop: () => void;
 }
 
-// React's minified hydration-mismatch codes (418, 423, 425) are the same
-// "Hydration failed" noise in production builds; a dev route shows the text.
+// Hydration mismatches are NOT ignored: a demo that renders differently on
+// the server is a real defect, and filtering it hid one (suppressHydrationWarning
+// on a route plus this list). They are console errors, so they are reported
+// as warnings on the take, not failures.
 const IGNORED =
-  /favicon\.ico|reo\.dev|analytics|webpack-hmr|\.map\b|Hydration failed|server rendered text|Minified React error #4(18|23|25)\b|Download the React DevTools/i;
+  /favicon\.ico|reo\.dev|analytics|webpack-hmr|\.map\b|Download the React DevTools/i;
 
 function shorten(text: string, max = 260): string {
   const flat = text.replace(/\s+/g, ' ').trim();
@@ -50,6 +52,7 @@ function shorten(text: string, max = 260): string {
  */
 export function captureConsole(page: Page): ConsoleCapture {
   const entries: ConsoleEntry[] = [];
+  ACTIVE.set(page, entries);
 
   const onConsole = (msg: { type: () => string; text: () => string; location: () => { url?: string; lineNumber?: number } }) => {
     const type = msg.type();
@@ -94,8 +97,37 @@ export function captureConsole(page: Page): ConsoleCapture {
       page.off('console', onConsole as never);
       page.off('pageerror', onPageError as never);
       page.off('requestfailed', onRequestFailed as never);
+      if (ACTIVE.get(page) === entries) ACTIVE.delete(page);
     },
   };
+}
+
+/** The live capture per page, so a wait deep in a handler can consult it. */
+const ACTIVE = new WeakMap<Page, ConsoleEntry[]>();
+
+/**
+ * Errors that mean the agent turn is already over -- the CopilotKit client
+ * reporting the run failed, the runtime endpoint refusing, or the model
+ * account rejecting the request. Anything else (a warning, an image 404) is
+ * not proof and the wait continues.
+ */
+// net::ERR_ABORTED is excluded: it is the browser cancelling its own request
+// (a threads-list refetch superseded by the next one, a component unmounting),
+// not the endpoint failing. On 2026-09-21 threads-drawer was failed "0s in" on
+// an aborted GET /threads while the run itself returned 200 and replied.
+const FATAL = /agent_run_failed|RUN_ERROR|insufficient_quota|no credits|invalid_api_key|Incorrect API key|\/api\/copilotkit\S* net::ERR_(?!ABORTED)/i;
+
+/**
+ * The first fatal error captured on `page` since capture began, or undefined.
+ *
+ * Only pages with an active `captureConsole` report anything; a handler that
+ * never started capture gets the old behaviour, waiting the full window.
+ */
+export function fatalConsoleError(page: Page): string | undefined {
+  const entries = ACTIVE.get(page);
+  if (!entries) return undefined;
+  const hit = entries.find((e) => e.level === 'error' && FATAL.test(e.text));
+  return hit?.text;
 }
 
 /**
@@ -120,4 +152,28 @@ export function findEntries(
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/**
+ * Entries that mean the app under test broke, as opposed to console noise.
+ *
+ * - an uncaught exception (`pageerror`);
+ * - Angular's ErrorHandler, which catches component errors and logs them as
+ *   `ERROR ...` instead of letting them reach `pageerror`, and any `NG0xxx`;
+ * - a request to one of the harness's own servers (localhost) that failed at
+ *   the network level. `ERR_ABORTED` is the browser cancelling, not a failure.
+ *
+ * A plain `console.error` from a library stays a warning: too many packages
+ * log recoverable conditions there for it to decide a verdict on its own.
+ */
+const BREAKING_CONSOLE = /^ERROR\b|\bNG0\d{3,}\b/;
+const LOCAL_REQUEST = /^\w+ https?:\/\/(localhost|127\.0\.0\.1)[:/]/;
+
+export function breakingErrors(entries: ConsoleEntry[]): ConsoleEntry[] {
+  return entries.filter((e) => {
+    if (e.level !== 'error') return false;
+    if (e.source === 'Uncaught') return true;
+    if (e.source === 'network') return LOCAL_REQUEST.test(e.text) && !/ERR_ABORTED/.test(e.text);
+    return BREAKING_CONSOLE.test(e.text);
+  });
 }
