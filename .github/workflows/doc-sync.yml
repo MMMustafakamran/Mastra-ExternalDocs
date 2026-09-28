@@ -42,6 +42,8 @@ jobs:
       # Recorded before the rewrite: once --update lands, the diff that
       # justified this PR is gone from the working tree.
       - name: Capture the drift that is being accepted
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e
           node ci/check-doc-drift.mjs > drift-before.txt 2>&1
@@ -49,8 +51,21 @@ jobs:
           set -e
           cat drift-before.txt
 
+      # --update exits 0 (all synced), 2 (synced what it could; a moved page or a
+      # new upstream page needs a human -- listed in sync.txt) or 3 (something
+      # could not be read). All three still open a PR carrying what WAS applied;
+      # only a crash of the checker itself fails the job.
       - name: Rewrite the snapshot
-        run: node ci/check-doc-drift.mjs --update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          node ci/check-doc-drift.mjs --update > sync.txt 2>&1
+          CODE=$?
+          set -e
+          cat sync.txt
+          case "$CODE" in 0|2|3) ;; *) exit "$CODE" ;; esac
+          echo "SYNC_CODE=$CODE" >> "$GITHUB_ENV"
 
       - name: Open a PR if anything changed
         env:
@@ -89,6 +104,14 @@ jobs:
             cat drift-before.txt
             echo '```'
             echo
+            if [ "${SYNC_CODE:-0}" != "0" ]; then
+              echo '### Not applied -- needs a human'
+              echo
+              echo '```'
+              grep -E 'needs a human|NOT CHECKED|^ • |NEW UPSTREAM' sync.txt || true
+              echo '```'
+              echo
+            fi
             echo '> Merging this makes the change above invisible to future drift'
             echo '> checks. Before merging, reconcile the demo pages with the new'
             echo '> code blocks -- a snapshot that moves without them means the'
@@ -106,6 +129,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: doc-sync-drift
-          path: drift-before.txt
+          path: |
+            drift-before.txt
+            sync.txt
           retention-days: 30
           if-no-files-found: warn

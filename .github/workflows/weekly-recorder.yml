@@ -118,11 +118,15 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # This repo's check-doc-drift.mjs exits 0 when clean and 2 on drift OR
-      # on a page it could not read -- both mean "do not record unattended".
-      # Any other code is the checker itself failing: drift unknown, not absent.
+      # check-doc-drift.mjs exits 0 clean, 2 drift (a page, a new page, a
+      # redirect, or a watched repo with new commits), 3 when something could
+      # not be read after a retry. 3 and any other code are "unknown": they
+      # still stop a scheduled run, but never file a "docs moved" issue.
       - name: Check the live docs against doc-snapshot/
         id: check
+        env:
+          # Watched repos are checked through the GitHub API.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e
           node ci/check-doc-drift.mjs > drift.txt 2>&1
@@ -143,8 +147,9 @@ jobs:
             echo
             case "$CODE" in
               0) echo "**Clean.** The live docs match the committed snapshot." ;;
-              2) echo "**Drifted (or a page was unreadable).** See the report below." ;;
-              *) echo "**Unknown.** The drift checker exited $CODE. Drift is unknown, not absent." ;;
+              2) echo "**Drifted.** Something upstream moved. See the report below." ;;
+              3) echo "**Unknown.** Something could not be read (listed under NOT CHECKED below). Drift is unknown, not absent." ;;
+              *) echo "**Unknown.** The drift checker itself failed (exit $CODE). Drift is unknown, not absent." ;;
             esac
             echo
             echo '```'

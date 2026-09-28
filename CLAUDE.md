@@ -1,13 +1,13 @@
 # mastra — Mastra's CopilotKit guide, external
 
-**Under test** <https://mastra.ai/guides/build-your-ui/copilotkit/overview> — **one** page
+**Under test** <https://mastra.ai/integrations/agentic-ui/copilotkit> — **one** page
+(formerly `/guides/build-your-ui/copilotkit/overview`, now a 308 redirect here)
 **Verdict** ✅ Every published snippet is correct. The gap is what is *not* published.
 Read [`doc-snapshot/reports/FINDINGS.md`](doc-snapshot/reports/FINDINGS.md) before changing anything here.
 
 ## One page, so routes are anchors
 
-Mastra documents the whole integration on a single page (also served
-byte-identical at `mastra.ai/integrations/agentic-ui/copilotkit`). So every
+Mastra documents the whole integration on a single page. So every
 entry in `pages.config.ts` sets `docPath` to a `#anchor`, and the recorder opens
 the same URL for each clip and scrolls to a different section. That is what a
 reader actually does.

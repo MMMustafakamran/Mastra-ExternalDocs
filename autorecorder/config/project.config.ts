@@ -42,10 +42,10 @@ export const PROJECT: ProjectConfig = {
   // the same integration through CopilotKit's docs and writes `MASTRA-react-*`.
   videoPrefix: 'MASTRA-ext',
 
-  // The single page. `mastra.ai/integrations/agentic-ui/copilotkit` serves
-  // byte-identical content — the same guide under two URLs — so either would
-  // do; this is the one the assignment names.
-  docBaseUrl: 'https://mastra.ai/guides/build-your-ui/copilotkit/overview',
+  // The single page. The assignment named /guides/build-your-ui/copilotkit/
+  // overview, but since 2026-09-28 (at the latest) that URL is a 308 Permanent
+  // Redirect to this one, so a clip opening it filmed a redirect.
+  docBaseUrl: 'https://mastra.ai/integrations/agentic-ui/copilotkit',
 
   // 3303. Eleven sibling repos in this workspace default to 3000; the
   // external-docs repos take 3301 (ag2), 3302 (agno), 3303 (mastra).

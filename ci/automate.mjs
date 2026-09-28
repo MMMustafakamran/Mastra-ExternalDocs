@@ -270,6 +270,17 @@ async function main() {
         process.exit(2);
       }
       console.log('⚠️ --ignore-doc-drift provided. Proceeding anyway...\n');
+    } else if (driftResult?.unknown) {
+      // Exit 3 territory: something was not read, so "all match" would be a
+      // claim about pages nobody checked.
+      console.log('\n🚫 [Doc Drift Check] Could not verify everything:');
+      for (const r of driftResult.unknownReasons) console.log(`   • ${r}`);
+      if (!ignoreDocDrift) {
+        console.log('⚠️ Halting. Re-run, or pass `--ignore-doc-drift` / `--force` to record anyway.');
+        generateReport(reportData);
+        process.exit(3);
+      }
+      console.log('⚠️ --ignore-doc-drift provided. Proceeding anyway...\n');
     } else if (driftResult) {
       console.log(`✅ [Doc Drift Check]: All ${driftResult.total} doc pages match the local snapshot.\n`);
     }

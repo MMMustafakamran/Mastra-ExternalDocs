@@ -3,20 +3,19 @@
   "docsRoot": "https://mastra.ai/integrations/agentic-ui",
   "syncedAt": "2026-09-07T14:13:47.361426Z",
   "pages": {
-    "https://mastra.ai/guides/build-your-ui/copilotkit/overview": {
-      "file": "guides__build-your-ui__copilotkit__overview.md",
+    "https://mastra.ai/integrations/agentic-ui/copilotkit": {
+      "file": "integrations__agentic-ui__copilotkit.md",
       "sha256": "77052f4d819c008fa334785d89e4a44292db0729d479031933a477504d331726",
       "bytes": 25029,
       "lines": 666,
-      "status": "ok"
+      "status": "ok",
+      "movedFrom": {
+        "url": "https://mastra.ai/guides/build-your-ui/copilotkit/overview",
+        "note": "308 Permanent Redirect to the new URL, found 2026-09-28. Content byte-identical at the move."
+      }
     }
   },
   "sitemap": {
-    "aliases": {
-      "https://mastra.ai/guides/build-your-ui/copilotkit/overview": [
-        "https://mastra.ai/integrations/agentic-ui/copilotkit"
-      ]
-    },
     "knownUnmapped": [
       "https://mastra.ai/integrations/agentic-ui/ai-sdk-ui",
       "https://mastra.ai/integrations/agentic-ui/assistant-ui",

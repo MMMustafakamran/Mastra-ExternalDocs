@@ -4,21 +4,45 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * Doc drift gate for the external-docs repos.
+ *
+ * Exit codes (the workflow maps them to its drift state):
+ *   0  clean -- every tracked page, the sitemap and every watched repo were read
+ *      and nothing moved
+ *   2  drift -- something changed upstream (page content, a new page, a page
+ *      that now redirects, a watched repo with new commits)
+ *   3  unknown -- something could not be read (after one retry), so the run is
+ *      NOT a verdict. Kept apart from 2 so a network blip is never reported as
+ *      "the docs moved".
+ *
+ * Two comparison modes:
+ *   markdown  the page serves a `.md` endpoint; the whole text is hashed.
+ *   html      it does not (docs.ag2.ai). The rendered page's code blocks,
+ *             headings and inline code are compared EXACTLY and IN ORDER
+ *             against doc-snapshot/signatures/<file>.json -- a pinned copy of
+ *             the same extraction, which `--update` rewrites. Indentation is
+ *             kept: in a Python snippet it is the program.
+ */
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const MANIFEST_PATH = path.join(ROOT_DIR, 'doc-snapshot', 'manifest.json');
 const PAGES_DIR = path.join(ROOT_DIR, 'doc-snapshot', 'pages');
+const SIGNATURES_DIR = path.join(ROOT_DIR, 'doc-snapshot', 'signatures');
 
 const CONCURRENCY = 6;
 const TIMEOUT_MS = 10000;
+const RETRY_DELAY_MS = 2000;
+const UA = 'CopilotKit-DocDrift-Detector/1.0';
 
 function sha256(text) {
   return crypto.createHash('sha256').update(normalizeText(text), 'utf8').digest('hex');
 }
 
 function normalizeText(raw) {
-  return raw.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  return raw.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
 }
 
 function categorizeSeverity(oldText, newText) {
@@ -53,6 +77,54 @@ function pageUrl(docPath, docsRoot) {
   return base.replace(/\/+$/, '');
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * One fetch, retried once on a thrown error (timeout, reset) or a 5xx/429.
+ *
+ * Redirects are NOT followed. A tracked URL that starts redirecting has moved,
+ * and following it silently is how mastra's page was checked for weeks through
+ * a 308 onto a different resource (`.../llms.txt`) that merely happened to
+ * match. The caller turns a 3xx into drift.
+ */
+async function fetchPage(url, headers = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await sleep(RETRY_DELAY_MS);
+    try {
+      const res = await fetch(url, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+        headers: { 'User-Agent': UA, ...headers },
+      });
+      if (res.status >= 500 || res.status === 429) {
+        lastErr = new Error(`HTTP ${res.status} ${res.statusText}`);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+function movedResult(docPath, pageMeta, res, url) {
+  const loc = res.headers.get('location') || '';
+  const target = loc ? new URL(loc, url).href : '(no Location header)';
+  return {
+    docPath,
+    file: pageMeta.file,
+    drifted: true,
+    status: 'moved',
+    severity: `HIGH (Page moved: ${res.status} -> ${target})`,
+    detail: [
+      `   The tracked URL now redirects. Re-key this page in doc-snapshot/manifest.json`,
+      `   to the new URL (and the recorder's doc URL with it); --update cannot decide that.`,
+    ],
+  };
+}
+
 function decodeEntities(s) {
   return s
     .replace(/&lt;/g, '<')
@@ -70,23 +142,44 @@ function stripTags(s) {
 }
 
 const normBlock = (s) => s.replace(/\s+/g, ' ').trim();
-const normHeading = (s) => s.replace(/[#¶`*]/g, '').trim();
+const normHeading = (s) => s.replace(/[#¶`*]/g, '').replace(/\s+/g, ' ').trim();
 
-/** Code blocks + headings of a rendered page — what a finding actually rests on. */
+/** Code as published: indentation kept, only line endings and trailing spaces normalised. */
+const exactBlock = (s) =>
+  normalizeText(s)
+    .split('\n')
+    .map((l) => l.replace(/\s+$/, ''))
+    .join('\n')
+    .replace(/^\n+|\n+$/g, '');
+
+/**
+ * Code blocks, headings and inline code of a rendered page, each in page order.
+ * Order matters: a moved step is a changed page.
+ */
 function htmlSignature(html) {
   const article = html.match(/<article[^>]*class="[^"]*md-content__inner[^"]*"[^>]*>([\s\S]*?)<\/article>/)
     || html.match(/<main[^>]*>([\s\S]*?)<\/main>/);
   const body = article ? article[1] : html;
-  const codes = [...body.matchAll(/<pre[^>]*>[\s\S]*?<code[^>]*>([\s\S]*?)<\/code>[\s\S]*?<\/pre>/g)]
+  const preRe = /<pre[^>]*>[\s\S]*?<code[^>]*>([\s\S]*?)<\/code>[\s\S]*?<\/pre>/g;
+  const codes = [...body.matchAll(preRe)]
+    .map((m) => exactBlock(stripTags(m[1])))
+    .filter(Boolean);
+  const headings = [...body.matchAll(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/g)]
+    .map((m) => `h${m[1]} ${normHeading(stripTags(m[2]))}`)
+    .filter((h) => h.length > 3);
+  // Identifiers named in prose (`AGUIStream`, `get_weather`): a rename there
+  // is a changed instruction even when no code block moved.
+  const inline = [...body.replace(preRe, '').matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)]
     .map((m) => normBlock(stripTags(m[1])))
     .filter(Boolean);
-  const headings = [...body.matchAll(/<h([2-4])[^>]*>([\s\S]*?)<\/h\1>/g)]
-    .map((m) => normHeading(stripTags(m[2])))
-    .filter(Boolean);
-  return { codes, headings };
+  return { codes, headings, inline };
 }
 
-/** The same signature, read out of a snapshot markdown file. */
+/**
+ * The loose signature of a snapshot markdown file: whitespace-collapsed code
+ * blocks and h2-h4 headings. Used ONLY to bootstrap a page that has no pinned
+ * signature yet, so the first pin is taken from a page already known to match.
+ */
 function markdownSignature(text) {
   const codes = [];
   const headings = [];
@@ -108,67 +201,116 @@ function markdownSignature(text) {
   return { codes, headings };
 }
 
+const signatureFile = (pageMeta) => pageMeta.file.replace(/\.md$/, '') + '.json';
+
+/** First line where two blocks differ, for a readable diff line. */
+function firstLineDiff(a, b) {
+  const al = a.split('\n');
+  const bl = b.split('\n');
+  for (let i = 0; i < Math.max(al.length, bl.length); i++) {
+    if (al[i] !== bl[i]) {
+      return [`     line ${i + 1} snapshot: ${JSON.stringify(al[i] ?? '(none)').slice(0, 110)}`,
+        `     line ${i + 1} live    : ${JSON.stringify(bl[i] ?? '(none)').slice(0, 110)}`];
+    }
+  }
+  return [];
+}
+
+/** Ordered comparison of two lists. Empty array = identical. */
+function listDiff(label, snap, live, { showBlocks = false } = {}) {
+  const out = [];
+  if (snap.length !== live.length) out.push(`   ${label}: ${snap.length} in snapshot, ${live.length} live`);
+  for (let i = 0; i < Math.max(snap.length, live.length); i++) {
+    if (snap[i] === live[i]) continue;
+    out.push(`   ${label} #${i + 1} differs`);
+    if (showBlocks && snap[i] !== undefined && live[i] !== undefined) out.push(...firstLineDiff(snap[i], live[i]));
+    else {
+      out.push(`     snapshot: ${JSON.stringify(snap[i] ?? '(none)').slice(0, 110)}`);
+      out.push(`     live    : ${JSON.stringify(live[i] ?? '(none)').slice(0, 110)}`);
+    }
+    if (out.length > 12) {
+      out.push('     ...');
+      break;
+    }
+  }
+  return out;
+}
+
 /**
  * Pages with no markdown endpoint (mkdocs, for one) are compared on their
- * rendered code blocks and headings instead. A prose-only edit is invisible to
- * this mode, and it says so in the severity string rather than claiming "ok".
+ * rendered code blocks, headings and inline code. Prose sentences are still
+ * invisible to this mode, and the run says so.
  */
 async function checkPageAsHtml(docPath, pageMeta, docsRoot) {
   const url = pageUrl(docPath, docsRoot) + '/';
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    headers: { 'User-Agent': 'CopilotKit-DocDrift-Detector/1.0' },
-  });
+  const res = await fetchPage(url);
+  if (res.status >= 300 && res.status < 400) return movedResult(docPath, pageMeta, res, url);
   if (!res.ok) {
     return { docPath, file: pageMeta.file, drifted: res.status === 404, status: String(res.status),
-      error: `HTTP ${res.status} ${res.statusText}`, mode: 'html',
+      error: res.status === 404 ? undefined : `HTTP ${res.status} ${res.statusText}`, mode: 'html',
       severity: res.status === 404 ? 'HIGH (Page 404 / Removed)' : undefined };
   }
   const live = htmlSignature(await res.text());
-  let snap = { codes: [], headings: [] };
+
+  let pinned;
   try {
-    snap = markdownSignature(await fs.readFile(path.join(PAGES_DIR, pageMeta.file), 'utf8'));
+    pinned = JSON.parse(await fs.readFile(path.join(SIGNATURES_DIR, signatureFile(pageMeta)), 'utf8'));
   } catch {
-    return { docPath, file: pageMeta.file, drifted: true, mode: 'html', status: 'no-snapshot',
-      severity: 'HIGH (No local snapshot to compare against)' };
+    pinned = undefined;
   }
-  const liveCodes = new Set(live.codes);
-  const snapCodes = new Set(snap.codes);
-  const codeAdded = live.codes.filter((c) => !snapCodes.has(c));
-  const codeRemoved = snap.codes.filter((c) => !liveCodes.has(c));
-  const headAdded = live.headings.filter((h) => !snap.headings.includes(h));
-  const headRemoved = snap.headings.filter((h) => !live.headings.includes(h));
-  if (!codeAdded.length && !codeRemoved.length && !headAdded.length && !headRemoved.length) {
+
+  if (!pinned) {
+    // Bootstrap: no pin yet. Compare loosely against the markdown snapshot so
+    // the first pin is only ever taken from a page that already matches it.
+    let snap;
+    try {
+      snap = markdownSignature(await fs.readFile(path.join(PAGES_DIR, pageMeta.file), 'utf8'));
+    } catch {
+      return { docPath, file: pageMeta.file, drifted: true, mode: 'html', status: 'no-snapshot',
+        severity: 'HIGH (No local snapshot to compare against)', signature: live };
+    }
+    const looseLive = { codes: live.codes.map(normBlock), headings: live.headings
+      .filter((h) => /^h[2-4] /.test(h)).map((h) => h.slice(3)) };
+    const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const matches = same(looseLive.codes, snap.codes) && same(looseLive.headings, snap.headings);
+    return matches
+      ? { docPath, file: pageMeta.file, drifted: false, mode: 'html', status: 'unpinned', signature: live }
+      : { docPath, file: pageMeta.file, drifted: true, mode: 'html', status: 'drifted', signature: live,
+        severity: 'HIGH (Differs from the markdown snapshot; no pinned signature yet)' };
+  }
+
+  const detail = [
+    ...listDiff('code block', pinned.codes, live.codes, { showBlocks: true }),
+    ...listDiff('heading', pinned.headings, live.headings),
+    ...listDiff('inline code', pinned.inline ?? [], live.inline),
+  ];
+  if (detail.length === 0) {
     return { docPath, file: pageMeta.file, drifted: false, status: 'ok-html', mode: 'html' };
   }
+  const codeChanged = JSON.stringify(pinned.codes) !== JSON.stringify(live.codes);
+  const headChanged = JSON.stringify(pinned.headings) !== JSON.stringify(live.headings);
   return {
     docPath,
     file: pageMeta.file,
     drifted: true,
     mode: 'html',
     status: 'drifted',
-    severity: codeAdded.length || codeRemoved.length
-      ? `HIGH (Code block content changed: +${codeAdded.length} / -${codeRemoved.length})`
-      : `MEDIUM (Headings / Structure changed: +${headAdded.length} / -${headRemoved.length})`,
-    detail: [
-      ...headAdded.map((h) => `   + heading only live    : ${h}`),
-      ...headRemoved.map((h) => `   - heading only snapshot: ${h}`),
-      ...codeAdded.slice(0, 5).map((c) => `   + code only live       : ${c.slice(0, 100)}`),
-      ...codeRemoved.slice(0, 5).map((c) => `   - code only snapshot   : ${c.slice(0, 100)}`),
-    ],
+    signature: live,
+    severity: codeChanged
+      ? 'HIGH (Code block content or order changed)'
+      : headChanged
+        ? 'MEDIUM (Headings / Structure changed)'
+        : 'LOW (Inline code in prose changed)',
+    detail,
   };
 }
 
 async function checkPage(docPath, pageMeta, docsRoot) {
   const url = `${pageUrl(docPath, docsRoot)}.md`;
   try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: {
-        'User-Agent': 'CopilotKit-DocDrift-Detector/1.0',
-        Accept: 'text/markdown, text/plain, */*',
-      },
-    });
+    const res = await fetchPage(url, { Accept: 'text/markdown, text/plain, */*' });
+
+    if (res.status >= 300 && res.status < 400) return movedResult(docPath, pageMeta, res, url);
 
     // A 404 on `.md` is not a removed page: docs.ag2.ai publishes no markdown
     // endpoint at all. The rendered page decides whether it is really gone.
@@ -188,7 +330,7 @@ async function checkPage(docPath, pageMeta, docsRoot) {
 
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('text/markdown') && !contentType.includes('text/plain')) {
-      // Soft 404, SPA redirect, or a docs site that simply serves no markdown.
+      // Soft 404, SPA shell, or a docs site that simply serves no markdown.
       // Compare the rendered page instead of reporting nothing.
       return await checkPageAsHtml(docPath, pageMeta, docsRoot);
     }
@@ -200,7 +342,6 @@ async function checkPage(docPath, pageMeta, docsRoot) {
       return { docPath, file: pageMeta.file, drifted: false, status: 'ok' };
     }
 
-    // Hash differs - determine severity
     let oldContent = '';
     try {
       oldContent = await fs.readFile(path.join(PAGES_DIR, pageMeta.file), 'utf8');
@@ -233,16 +374,58 @@ async function checkPage(docPath, pageMeta, docsRoot) {
   }
 }
 
-export async function applyDocUpdates(driftedPages) {
+/**
+ * Repos a finding rests on, outside the docs. ag2's starter is one: two of its
+ * findings are about code in `ag2ai/ag2-copilotkit-starter`, and a fix landing
+ * there would leave them stale with no page changing at all.
+ */
+async function checkWatchedRepos(manifest) {
+  const repos = manifest.watchedRepos ?? [];
+  const headers = { Accept: 'application/vnd.github.sha' };
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const results = [];
+  for (const w of repos) {
+    const docPath = `https://github.com/${w.repo}`;
+    try {
+      const res = await fetchPage(`https://api.github.com/repos/${w.repo}/commits/${w.ref}`, headers);
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      const sha = (await res.text()).trim();
+      if (sha === w.sha) {
+        results.push({ docPath, kind: 'repo', drifted: false, status: 'ok' });
+      } else {
+        results.push({
+          docPath, kind: 'repo', drifted: true, status: 'drifted', repo: w.repo, newSha: sha,
+          severity: `HIGH (Watched repo has new commits on ${w.ref})`,
+          oldHash: w.sha.slice(0, 12), newHash: sha.slice(0, 12),
+          detail: [`   ${w.why}`, `   Diff: ${docPath}/compare/${w.sha.slice(0, 12)}...${sha.slice(0, 12)}`],
+        });
+      }
+    } catch (err) {
+      results.push({ docPath, kind: 'repo', drifted: false, status: 'fetch-error', error: err.message });
+    }
+  }
+  return results;
+}
+
+export async function applyDocUpdates(results) {
   const manifestRaw = await fs.readFile(MANIFEST_PATH, 'utf8');
   const manifest = JSON.parse(manifestRaw);
   let updatedCount = 0;
+  const unresolved = [];
 
-  for (const p of driftedPages) {
-    if (p.fetchedText && p.file) {
-      const filePath = path.join(PAGES_DIR, p.file);
-      await fs.writeFile(filePath, p.fetchedText, 'utf8');
-
+  for (const p of results) {
+    if (p.status === 'moved' || p.status === 'no-snapshot' || p.status === '404') {
+      unresolved.push(p);
+      continue;
+    }
+    if (p.kind === 'repo' && p.drifted) {
+      const w = manifest.watchedRepos.find((r) => r.repo === p.repo);
+      w.sha = p.newSha;
+      w.pinnedAt = new Date().toISOString();
+      updatedCount++;
+      console.log(` ✅ Pinned ${p.repo} at ${p.newSha.slice(0, 12)}`);
+    } else if (p.fetchedText && p.file) {
+      await fs.writeFile(path.join(PAGES_DIR, p.file), p.fetchedText, 'utf8');
       if (manifest.pages[p.docPath]) {
         manifest.pages[p.docPath].sha256 = p.fullHash;
         manifest.pages[p.docPath].bytes = p.bytes;
@@ -251,28 +434,39 @@ export async function applyDocUpdates(driftedPages) {
       }
       updatedCount++;
       console.log(` ✅ Updated ${p.file} (${p.docPath})`);
+    } else if (p.signature && p.file) {
+      // HTML-mode page: the pin is the extracted signature. The prose .md in
+      // pages/ is NOT regenerated (there is no markdown to fetch) -- say so.
+      await fs.mkdir(SIGNATURES_DIR, { recursive: true });
+      const file = signatureFile(p);
+      await fs.writeFile(
+        path.join(SIGNATURES_DIR, file),
+        JSON.stringify({ url: p.docPath, pinnedAt: new Date().toISOString(), ...p.signature }, null, 2) + '\n',
+        'utf8',
+      );
+      if (manifest.pages[p.docPath]) manifest.pages[p.docPath].signature = `signatures/${file}`;
+      updatedCount++;
+      console.log(` ✅ Pinned signatures/${file} (${p.docPath})`);
+      if (p.drifted) console.log(`    ⚠️  pages/${p.file} (prose) was not regenerated -- update it by hand if the prose matters.`);
     }
   }
 
   manifest.syncedAt = new Date().toISOString();
   await fs.writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-  console.log(`\n💾 Successfully updated ${updatedCount} markdown file(s) and saved doc-snapshot/manifest.json.`);
-  return updatedCount;
+  console.log(`\n💾 Updated ${updatedCount} item(s) and saved doc-snapshot/manifest.json.`);
+  for (const p of unresolved) {
+    console.log(` ❗ Not applied, needs a human: ${p.docPath} -- ${p.severity}`);
+  }
+  return { updatedCount, unresolved };
 }
 
 /**
  * The gap the hash check cannot see: pages that appeared upstream.
  *
  * Every URL the sitemap lists under this repo's docs root is either tracked
- * (a manifest page), already acknowledged (`sitemap.knownUnmapped`, seeded by
- * /doc-sync), or new. New is drift -- a page nobody has read, with no route,
- * no recorder entry and no diff. Ten of them were missed on 2026-09-04 because
- * only the in-app /doc-sync action made this comparison and nothing in CI ran
- * it. The same logic as `buildSitemapFinding` in
- * frontend/src/lib/doc-sync/actions.ts, without the Next.js import chain.
- *
- * `lastmod` is ignored on purpose: it is the site's build stamp, not a
- * per-page modification time.
+ * (a manifest page), already acknowledged (`sitemap.knownUnmapped`), or new.
+ * New is drift. `lastmod` is ignored on purpose: it is the site's build stamp,
+ * not a per-page modification time.
  */
 let _manifestCache;
 function manifestRoutes(docPath) {
@@ -281,14 +475,11 @@ function manifestRoutes(docPath) {
 
 /**
  * `/sitemap.xml` is a sitemap *index* on some sites (mastra.ai is one): its
- * <loc>s are other sitemaps, not pages. Reading it flat reports nine sitemap
- * files as "new upstream pages" and no real page at all.
+ * <loc>s are other sitemaps, not pages. A child that cannot be read is counted,
+ * not swallowed -- a page listed only there would otherwise go unseen.
  */
-async function fetchSitemapLocs(url, depth = 0) {
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    headers: { 'User-Agent': 'CopilotKit-DocDrift-Detector/1.0' },
-  });
+async function fetchSitemapLocs(url, failures, depth = 0) {
+  const res = await fetchPage(url);
   if (!res.ok) throw new Error(`sitemap HTTP ${res.status}`);
   const xml = await res.text();
   const locs = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1].trim());
@@ -297,11 +488,12 @@ async function fetchSitemapLocs(url, depth = 0) {
   const out = [];
   for (const child of locs.slice(0, 20)) {
     try {
-      out.push(...(await fetchSitemapLocs(child, depth + 1)));
-    } catch {
-      // one unreadable child sitemap must not blind the whole check
+      out.push(...(await fetchSitemapLocs(child, failures, depth + 1)));
+    } catch (err) {
+      failures.push(`${child} (${err.message})`);
     }
   }
+  if (locs.length > 20) failures.push(`${locs.length - 20} child sitemap(s) beyond the first 20 not read`);
   return out;
 }
 
@@ -313,11 +505,12 @@ export async function checkSitemapGaps(manifest) {
   // every page with one and the manifest keys carry none.
   const canon = (u) => u.replace(/\/+$/, '');
 
+  const failures = [];
   let locs;
   try {
-    locs = await fetchSitemapLocs(`${root.origin}/sitemap.xml`);
+    locs = await fetchSitemapLocs(`${root.origin}/sitemap.xml`, failures);
   } catch (err) {
-    return { error: err.message, newUnmapped: [], missingFromSitemap: [] };
+    return { error: err.message, failures, newUnmapped: [], missingFromSitemap: [] };
   }
 
   const upstream = locs
@@ -325,14 +518,10 @@ export async function checkSitemapGaps(manifest) {
     .filter((u) => u.startsWith(prefix) || canon(u) === canon(prefix))
     .map(canon);
 
-  // Manifest keys here are already absolute; only the sibling repos' path-style
-  // keys need the origin prepended.
   const abs = (docPath) => canon(/^https?:\/\//.test(docPath) ? docPath : `${root.origin}${docPath}`);
 
-  // One page, two published URLs: mastra.ai serves the CopilotKit guide at both
-  // /guides/build-your-ui/copilotkit/overview and /integrations/agentic-ui/
-  // copilotkit, and lists only the second in its sitemap. Without the alias the
-  // tracked page reads as removed on every run.
+  // One page, several published URLs: a page listed under any of its aliases
+  // is listed.
   const aliasesOf = (docPath) => {
     const a = manifest.sitemap?.aliases?.[docPath];
     return (Array.isArray(a) ? a : a ? [a] : []).map(abs);
@@ -347,10 +536,10 @@ export async function checkSitemapGaps(manifest) {
 
   return {
     urlsUnderRoot: upstream.length,
+    failures,
     newUnmapped: upstream.filter((u) => !covered.has(u) && !known.has(u)),
     // Tracked but no longer listed. Alone this is a hint, not a removal --
-    // the per-page 404 check above is the other half of that verdict. A page
-    // listed under any one of its URLs is listed.
+    // the per-page check is the other half of that verdict.
     missingFromSitemap: tracked
       .filter((t) => !t.urls.some((u) => upstreamSet.has(u)))
       .map((t) => abs(t.docPath)),
@@ -378,38 +567,56 @@ export async function checkAllDocDrift() {
     }
   }
 
-  const workers = Array.from({ length: CONCURRENCY }, () => worker());
-  await Promise.all(workers);
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
   process.stdout.write('\n\n');
 
-  const driftedPages = results.filter((r) => r.drifted);
-  const errors = results.filter((r) => r.error);
+  const repoResults = await checkWatchedRepos(manifest);
+  for (const r of repoResults) {
+    console.log(`🔗 Watched repo ${r.docPath}: ${r.drifted ? `NEW COMMITS (${r.oldHash} -> ${r.newHash})` : r.error ? `unreadable (${r.error})` : 'unchanged'}`);
+  }
+  const all = [...results, ...repoResults];
 
   const sitemap = await checkSitemapGaps(manifest);
   if (sitemap.error) {
-    console.log(`ℹ️  Sitemap unreachable (${sitemap.error}); new upstream pages NOT checked this run.`);
+    console.log(`🚫 Sitemap unreachable (${sitemap.error}); new upstream pages NOT checked this run.`);
   } else {
     console.log(
       `🗺️  Sitemap: ${sitemap.urlsUnderRoot} URLs under ${manifest.docsRoot}, ` +
         `${sitemap.newUnmapped.length} new, ${sitemap.missingFromSitemap.length} tracked page(s) no longer listed.`,
     );
     for (const u of sitemap.missingFromSitemap) console.log(`   · not in sitemap: ${u}`);
+    for (const f of sitemap.failures) console.log(`   🚫 child sitemap unreadable: ${f}`);
   }
 
   const htmlMode = results.filter((r) => r.mode === 'html').length;
   if (htmlMode > 0) {
     console.log(
       `📄 ${htmlMode}/${results.length} page(s) have no markdown endpoint and were compared on ` +
-        `rendered code blocks + headings. Prose-only edits are invisible in that mode.`,
+        `rendered code blocks, headings and inline code (exact, in order). Prose sentences are invisible in that mode.`,
     );
   }
+
+  const driftedPages = all.filter((r) => r.drifted);
+  const errors = all.filter((r) => r.error);
+  const unpinned = results.filter((r) => r.status === 'unpinned');
+
+  // Anything not read is not a verdict. Listed so exit 3 always says why.
+  const unknownReasons = [
+    ...errors.map((e) => `${e.docPath} -- ${e.error}`),
+    ...(sitemap.error ? [`sitemap -- ${sitemap.error}`] : []),
+    ...sitemap.failures.map((f) => `sitemap -- ${f}`),
+    ...unpinned.map((u) => `${u.docPath} -- no pinned signature (run with --update to pin it)`),
+  ];
 
   return {
     total: entries.length,
     checked: results.length,
     docsRoot: manifest.docsRoot,
     drifted: driftedPages.length > 0 || sitemap.newUnmapped.length > 0,
+    unknown: unknownReasons.length > 0,
+    unknownReasons,
     driftedPages,
+    results: all,
     sitemap,
     errors,
   };
@@ -420,15 +627,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const autoUpdate = args.includes('--update') || args.includes('--sync') || args.includes('-u');
 
-  // Scope, said out loud on every run. Tracked pages are hashed; the sitemap
-  // is compared for pages that appeared upstream (new = drift, exit 2).
-  // Renames and removals are only hinted -- a tracked page that 404s AND has
-  // left the sitemap is reported, but nothing here decides it was renamed.
   process.on('exit', () => {
     console.log(
-      '\nℹ️  Scope: tracked pages hashed + sitemap compared for new pages.\n' +
-        '   A page that 404s and has left the sitemap is listed; whether it was\n' +
-        '   renamed is a judgement for /doc-sync and the reader.',
+      '\nℹ️  Scope: tracked pages compared, sitemap compared for new pages, watched repos compared by commit.\n' +
+        '   Exit 0 clean · 2 drift · 3 could not read something (not a verdict).',
     );
   });
 
@@ -436,65 +638,61 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (result.sitemap.newUnmapped.length > 0) {
     console.log('🆕 [NEW UPSTREAM PAGES] Listed in the sitemap, tracked nowhere in this repo:');
     for (const u of result.sitemap.newUnmapped) console.log(` • ${u}`);
-    console.log('   Snapshot them from http://localhost:3000/doc-sync, or add them to\n' +
-      '   sitemap.knownUnmapped in doc-snapshot/manifest.json to acknowledge them.\n');
+    console.log('   Snapshot them, or add them to sitemap.knownUnmapped in\n' +
+      '   doc-snapshot/manifest.json to acknowledge them.\n');
   }
   const gone = result.driftedPages.filter((p) => p.status === '404' &&
     result.sitemap.missingFromSitemap?.includes(
       (/^https?:\/\//.test(p.docPath) ? p.docPath : `${new URL(result.docsRoot).origin}${p.docPath}`)
         .replace(/\/+$/, '')));
   if (gone.length > 0) {
-    console.log('🗑️  [REMOVED OR RENAMED] 404 on the markdown endpoint AND gone from the sitemap:');
+    console.log('🗑️  [REMOVED OR RENAMED] 404 AND gone from the sitemap:');
     for (const p of gone) console.log(` • ${p.docPath}  (route(s): ${manifestRoutes(p.docPath)})`);
     console.log('   The route(s) still serve and the recorder still passes them. Decide, then delete.\n');
   }
 
   if (result.driftedPages.length > 0) {
-    console.log('🚨 [DOC DRIFT DETECTED] The following live documentation pages have changed:');
+    console.log('🚨 [DOC DRIFT DETECTED] The following upstream sources have changed:');
     console.log('───────────────────────────────────────────────────────────────────────────');
     for (const p of result.driftedPages) {
       console.log(` • [${p.severity}] ${p.docPath}`);
       if (p.oldHash && p.newHash) {
-        console.log(`   Hash: ${p.oldHash} ➔ ${p.newHash} (${p.file})`);
+        console.log(`   Hash: ${p.oldHash} ➔ ${p.newHash}${p.file ? ` (${p.file})` : ''}`);
       }
       for (const line of p.detail ?? []) console.log(line);
     }
     console.log('───────────────────────────────────────────────────────────────────────────');
-
-    if (autoUpdate) {
-      console.log('\n🔄 Applying changes to local markdown snapshot files (--update flag)...');
-      await applyDocUpdates(result.driftedPages);
-      console.log('✨ Local markdown files are now in sync with live docs.');
-      process.exit(0);
-    } else {
-      if (process.stdin.isTTY) {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await rl.question('\n❓ Would you like to update and overwrite the local markdown files now? (y/N): ');
-        rl.close();
-
-        if (answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes') {
-          console.log('\n🔄 Applying changes to local markdown files...');
-          await applyDocUpdates(result.driftedPages);
-          console.log('✨ Local markdown files are now in sync with live docs.');
-          process.exit(0);
-        }
-      }
-
-      console.log('\n👉 Local markdown files NOT modified. Pass `--update` or visit http://localhost:3000/doc-sync to sync.');
-      process.exit(2);
-    }
   }
-  if (result.driftedPages.length === 0) {
-    if (result.sitemap.newUnmapped.length > 0) process.exit(2);
-    // A page nobody could fetch is a page nobody checked. Reporting "no drift"
-    // for it is how this gate passed green for four pages it never read.
-    if (result.errors.length > 0) {
-      console.log(`🚫 [NOT CHECKED] ${result.errors.length} of ${result.total} page(s) could not be read:`);
-      for (const e of result.errors) console.log(` • ${e.docPath} — ${e.error}`);
-      console.log('   Nothing above is a verdict on those pages.');
-      process.exit(2);
-    }
-    console.log(`✅ [NO DOC DRIFT] All ${result.total} documentation pages match the local snapshot.`);
-    process.exit(0);
+  if (result.unknown) {
+    console.log(`🚫 [NOT CHECKED] ${result.unknownReasons.length} thing(s) could not be verified:`);
+    for (const r of result.unknownReasons) console.log(` • ${r}`);
+    console.log('   Nothing above is a verdict on those.');
   }
+
+  // Unpinned pages are applied by --update even when nothing drifted: that is
+  // how a page gets its first pin.
+  const applicable = [...result.driftedPages, ...result.results.filter((r) => r.status === 'unpinned')];
+  let wantUpdate = autoUpdate;
+  if (!autoUpdate && applicable.length > 0 && process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await rl.question('\n❓ Update the local snapshot now? (y/N): ');
+    rl.close();
+    wantUpdate = ['y', 'yes'].includes(answer.trim().toLowerCase());
+  }
+
+  if (wantUpdate && applicable.length > 0) {
+    console.log('\n🔄 Applying changes to doc-snapshot/...');
+    const { unresolved } = await applyDocUpdates(applicable);
+    const stillUnknown = result.errors.length > 0 || result.sitemap.error || result.sitemap.failures.length > 0;
+    if (unresolved.length > 0 || result.sitemap.newUnmapped.length > 0) process.exit(2);
+    process.exit(stillUnknown ? 3 : 0);
+  }
+
+  if (result.drifted) {
+    console.log('\n👉 Local snapshot NOT modified. Pass `--update` (npm run drift:sync) to sync.');
+    process.exit(2);
+  }
+  if (result.unknown) process.exit(3);
+  console.log(`✅ [NO DOC DRIFT] All ${result.total} documentation pages match the local snapshot.`);
+  process.exit(0);
 }
