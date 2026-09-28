@@ -1,15 +1,6 @@
 name: Doc sync
 
-# The other half of the drift gate in daily-recorder.yml.
-#
-# That workflow STOPS when the live docs move, and says so in an issue. It
-# deliberately does not fix anything: rewriting the snapshot is the act of
-# accepting a change as intended, and that is a judgement call, not a nightly
-# side effect. This workflow is the button that issue tells you to press.
-#
-# It opens a PR rather than pushing. The snapshot is what every future drift
-# comparison is measured against -- overwriting it unreviewed would mean a
-# silently-accepted upstream change can never be noticed again.
+# Accepts upstream drift: rewrites doc-snapshot/ and opens a PR for review.
 
 on:
   workflow_dispatch:
@@ -39,8 +30,7 @@ jobs:
         with:
           node-version: 22
 
-      # Recorded before the rewrite: once --update lands, the diff that
-      # justified this PR is gone from the working tree.
+      # Captured first; --update erases the diff.
       - name: Capture the drift that is being accepted
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -51,10 +41,7 @@ jobs:
           set -e
           cat drift-before.txt
 
-      # --update exits 0 (all synced), 2 (synced what it could; a moved page or a
-      # new upstream page needs a human -- listed in sync.txt) or 3 (something
-      # could not be read). All three still open a PR carrying what WAS applied;
-      # only a crash of the checker itself fails the job.
+      # 0 synced, 2 partly (rest needs a human), 3 unreadable: all open a PR.
       - name: Rewrite the snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}

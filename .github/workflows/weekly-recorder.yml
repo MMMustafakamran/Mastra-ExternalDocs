@@ -1,24 +1,11 @@
 name: Weekly Doc Check, Version Watch and Demo Recording
 
-# Ported from the sibling repos' daily-recorder.yml (MsPy-react), same stages,
-# each gating the next:
-#
-#   1. drift    -- do the live docs (mastra.ai) still say what doc-snapshot/
-#                  says? On a scheduled run, drift STOPS here and files an
-#                  issue pointing at the Doc sync workflow.
-#   2. versions -- what resolved today, and does the documented install still
-#                  work? Reports; never blocks.
-#   3. record   -- two sharded workers (four pages), then consolidate.
-#
-# Differences from the siblings: one checkbox per page (PAGE_GROUPS in
-# ci/lib/pages.mjs), the backend is the Node mastra-server/ (`mastra dev`), not uv, and no README status check (these repos
-# have no nav-config.ts for ci/write-readme-status.mjs to read).
+# 1. drift (mastra.ai) -> 2. versions -> 3. record on 2 shards -> consolidate.
+# A scheduled run stops at 1 on drift and files an issue.
 
 on:
   schedule:
-    # 00:00 UTC Monday = 5:00 AM PKT Monday (Asia/Karachi, UTC+5, no DST).
-    # GitHub's scheduler is best-effort and the sibling repos see crons fire
-    # hours late; if exact timing matters, dispatch with `gh workflow run`.
+    # Monday 05:00 PKT. GitHub may start it late.
     - cron: '0 0 * * 1'
   workflow_dispatch:
     inputs:
@@ -118,14 +105,11 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # check-doc-drift.mjs exits 0 clean, 2 drift (a page, a new page, a
-      # redirect, or a watched repo with new commits), 3 when something could
-      # not be read after a retry. 3 and any other code are "unknown": they
-      # still stop a scheduled run, but never file a "docs moved" issue.
+      # Exit 0 clean, 2 drift, 3 unreadable. Only 2 files an issue.
       - name: Check the live docs against doc-snapshot/
         id: check
         env:
-          # Watched repos are checked through the GitHub API.
+          # For the watched-repo check.
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e
@@ -216,8 +200,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A scheduled run is unattended, so drift halts it. A manual run only
-          # halts if the operator chose halt-on-drift.
+          # Scheduled runs halt on drift; manual runs only with halt-on-drift.
           GATING=false
           if [ "$STATE" != "clean" ]; then
             if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ] || [ "${RUN_MODE:-}" = "halt-on-drift" ]; then
@@ -262,8 +245,7 @@ jobs:
         with:
           node-version: 22
 
-      # Resolve the way ci/automate.mjs does by default: lockfiles dropped, so
-      # this is what the package ranges give today.
+      # Lockfiles dropped, as ci/automate.mjs does.
       - name: Re-resolve dependencies
         run: |
           set -euo pipefail
@@ -277,7 +259,7 @@ jobs:
           rm -f mastra-server/package-lock.json
           npm --prefix mastra-server install --no-audit --no-fund
 
-      # One resolution shared by every shard, so all record on the same tree.
+      # Every shard records on this one resolution.
       - name: Share the resolved trees with the workers
         uses: actions/cache/save@v4
         with:
@@ -337,8 +319,7 @@ jobs:
             mastra-server/node_modules
             mastra-server/package-lock.json
 
-      # Reported, not gating: a doc snippet that no longer typechecks is a
-      # finding, not a build break.
+      # Reports only; never fails the run.
       - name: Typecheck, unit tests, core drift
         run: |
           set +e
@@ -443,7 +424,7 @@ jobs:
             EXTRA_FLAGS="$EXTRA_FLAGS --use-lockfile --skip-install"
             echo "- Dependencies: the trees stage 2 resolved this run, installed once" >> "$GITHUB_STEP_SUMMARY"
           fi
-          # Stage 1 already decided on drift; the shard never contacts the docs.
+          # Stage 1 already checked drift.
           EXTRA_FLAGS="$EXTRA_FLAGS --skip-doc-drift"
 
           echo "Shard ${SHARD}/2 flags: $EXTRA_FLAGS $RECORD_ARGS"

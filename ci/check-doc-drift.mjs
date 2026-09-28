@@ -5,24 +5,10 @@ import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Doc drift gate for the external-docs repos.
+ * Exit: 0 clean, 2 drift, 3 something could not be read (not a verdict).
  *
- * Exit codes (the workflow maps them to its drift state):
- *   0  clean -- every tracked page, the sitemap and every watched repo were read
- *      and nothing moved
- *   2  drift -- something changed upstream (page content, a new page, a page
- *      that now redirects, a watched repo with new commits)
- *   3  unknown -- something could not be read (after one retry), so the run is
- *      NOT a verdict. Kept apart from 2 so a network blip is never reported as
- *      "the docs moved".
- *
- * Two comparison modes:
- *   markdown  the page serves a `.md` endpoint; the whole text is hashed.
- *   html      it does not (docs.ag2.ai). The rendered page's code blocks,
- *             headings and inline code are compared EXACTLY and IN ORDER
- *             against doc-snapshot/signatures/<file>.json -- a pinned copy of
- *             the same extraction, which `--update` rewrites. Indentation is
- *             kept: in a Python snippet it is the program.
+ * Pages with a `.md` endpoint are hashed. Pages without one (docs.ag2.ai) are
+ * compared exactly and in order against doc-snapshot/signatures/<file>.json.
  */
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,7 +28,7 @@ function sha256(text) {
 }
 
 function normalizeText(raw) {
-  return raw.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  return raw.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
 }
 
 function categorizeSeverity(oldText, newText) {
@@ -65,11 +51,7 @@ function categorizeSeverity(oldText, newText) {
   return 'LOW (Prose / text phrasing updated)';
 }
 
-/**
- * In these external-docs repos a manifest key is the vendor's own absolute URL,
- * not a path under docs.copilotkit.ai. Build the endpoint from the key itself,
- * falling back to `docsRoot` for the path-style keys the sibling repos use.
- */
+/** Manifest keys are absolute URLs here; path-style keys fall back to `docsRoot`. */
 function pageUrl(docPath, docsRoot) {
   const base = /^https?:\/\//.test(docPath)
     ? docPath
@@ -79,14 +61,7 @@ function pageUrl(docPath, docsRoot) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * One fetch, retried once on a thrown error (timeout, reset) or a 5xx/429.
- *
- * Redirects are NOT followed. A tracked URL that starts redirecting has moved,
- * and following it silently is how mastra's page was checked for weeks through
- * a 308 onto a different resource (`.../llms.txt`) that merely happened to
- * match. The caller turns a 3xx into drift.
- */
+/** Retries once on an error or 5xx/429. Does not follow redirects: a 3xx is drift. */
 async function fetchPage(url, headers = {}) {
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -144,7 +119,7 @@ function stripTags(s) {
 const normBlock = (s) => s.replace(/\s+/g, ' ').trim();
 const normHeading = (s) => s.replace(/[#¶`*]/g, '').replace(/\s+/g, ' ').trim();
 
-/** Code as published: indentation kept, only line endings and trailing spaces normalised. */
+/** Keeps indentation; normalises only line endings and trailing spaces. */
 const exactBlock = (s) =>
   normalizeText(s)
     .split('\n')
@@ -152,10 +127,7 @@ const exactBlock = (s) =>
     .join('\n')
     .replace(/^\n+|\n+$/g, '');
 
-/**
- * Code blocks, headings and inline code of a rendered page, each in page order.
- * Order matters: a moved step is a changed page.
- */
+/** Code blocks, headings and inline code of a rendered page, in page order. */
 function htmlSignature(html) {
   const article = html.match(/<article[^>]*class="[^"]*md-content__inner[^"]*"[^>]*>([\s\S]*?)<\/article>/)
     || html.match(/<main[^>]*>([\s\S]*?)<\/main>/);
@@ -167,19 +139,13 @@ function htmlSignature(html) {
   const headings = [...body.matchAll(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/g)]
     .map((m) => `h${m[1]} ${normHeading(stripTags(m[2]))}`)
     .filter((h) => h.length > 3);
-  // Identifiers named in prose (`AGUIStream`, `get_weather`): a rename there
-  // is a changed instruction even when no code block moved.
   const inline = [...body.replace(preRe, '').matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)]
     .map((m) => normBlock(stripTags(m[1])))
     .filter(Boolean);
   return { codes, headings, inline };
 }
 
-/**
- * The loose signature of a snapshot markdown file: whitespace-collapsed code
- * blocks and h2-h4 headings. Used ONLY to bootstrap a page that has no pinned
- * signature yet, so the first pin is taken from a page already known to match.
- */
+/** Loose signature of a snapshot .md; only used before a page's first pin. */
 function markdownSignature(text) {
   const codes = [];
   const headings = [];
@@ -203,7 +169,7 @@ function markdownSignature(text) {
 
 const signatureFile = (pageMeta) => pageMeta.file.replace(/\.md$/, '') + '.json';
 
-/** First line where two blocks differ, for a readable diff line. */
+/** First differing line of two blocks. */
 function firstLineDiff(a, b) {
   const al = a.split('\n');
   const bl = b.split('\n');
@@ -216,7 +182,7 @@ function firstLineDiff(a, b) {
   return [];
 }
 
-/** Ordered comparison of two lists. Empty array = identical. */
+/** Ordered diff of two lists; empty when identical. */
 function listDiff(label, snap, live, { showBlocks = false } = {}) {
   const out = [];
   if (snap.length !== live.length) out.push(`   ${label}: ${snap.length} in snapshot, ${live.length} live`);
@@ -236,11 +202,7 @@ function listDiff(label, snap, live, { showBlocks = false } = {}) {
   return out;
 }
 
-/**
- * Pages with no markdown endpoint (mkdocs, for one) are compared on their
- * rendered code blocks, headings and inline code. Prose sentences are still
- * invisible to this mode, and the run says so.
- */
+/** For pages with no `.md` endpoint. Prose sentences are not compared. */
 async function checkPageAsHtml(docPath, pageMeta, docsRoot) {
   const url = pageUrl(docPath, docsRoot) + '/';
   const res = await fetchPage(url);
@@ -260,8 +222,7 @@ async function checkPageAsHtml(docPath, pageMeta, docsRoot) {
   }
 
   if (!pinned) {
-    // Bootstrap: no pin yet. Compare loosely against the markdown snapshot so
-    // the first pin is only ever taken from a page that already matches it.
+    // No pin yet: only pin a page that matches the markdown snapshot.
     let snap;
     try {
       snap = markdownSignature(await fs.readFile(path.join(PAGES_DIR, pageMeta.file), 'utf8'));
@@ -312,8 +273,7 @@ async function checkPage(docPath, pageMeta, docsRoot) {
 
     if (res.status >= 300 && res.status < 400) return movedResult(docPath, pageMeta, res, url);
 
-    // A 404 on `.md` is not a removed page: docs.ag2.ai publishes no markdown
-    // endpoint at all. The rendered page decides whether it is really gone.
+    // No markdown endpoint (docs.ag2.ai): check the rendered page instead.
     if (res.status === 404) {
       return await checkPageAsHtml(docPath, pageMeta, docsRoot);
     }
@@ -330,8 +290,7 @@ async function checkPage(docPath, pageMeta, docsRoot) {
 
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('text/markdown') && !contentType.includes('text/plain')) {
-      // Soft 404, SPA shell, or a docs site that simply serves no markdown.
-      // Compare the rendered page instead of reporting nothing.
+      // Not markdown: check the rendered page instead.
       return await checkPageAsHtml(docPath, pageMeta, docsRoot);
     }
 
@@ -374,11 +333,7 @@ async function checkPage(docPath, pageMeta, docsRoot) {
   }
 }
 
-/**
- * Repos a finding rests on, outside the docs. ag2's starter is one: two of its
- * findings are about code in `ag2ai/ag2-copilotkit-starter`, and a fix landing
- * there would leave them stale with no page changing at all.
- */
+/** Repos that findings rest on (`watchedRepos`), compared by commit SHA. */
 async function checkWatchedRepos(manifest) {
   const repos = manifest.watchedRepos ?? [];
   const headers = { Accept: 'application/vnd.github.sha' };
@@ -435,8 +390,7 @@ export async function applyDocUpdates(results) {
       updatedCount++;
       console.log(` ✅ Updated ${p.file} (${p.docPath})`);
     } else if (p.signature && p.file) {
-      // HTML-mode page: the pin is the extracted signature. The prose .md in
-      // pages/ is NOT regenerated (there is no markdown to fetch) -- say so.
+      // Pins the signature only; pages/<file>.md is not regenerated.
       await fs.mkdir(SIGNATURES_DIR, { recursive: true });
       const file = signatureFile(p);
       await fs.writeFile(
@@ -460,24 +414,13 @@ export async function applyDocUpdates(results) {
   return { updatedCount, unresolved };
 }
 
-/**
- * The gap the hash check cannot see: pages that appeared upstream.
- *
- * Every URL the sitemap lists under this repo's docs root is either tracked
- * (a manifest page), already acknowledged (`sitemap.knownUnmapped`), or new.
- * New is drift. `lastmod` is ignored on purpose: it is the site's build stamp,
- * not a per-page modification time.
- */
+/** New pages: sitemap URLs under docsRoot that are neither tracked nor in `knownUnmapped`. */
 let _manifestCache;
 function manifestRoutes(docPath) {
   return (_manifestCache?.pages?.[docPath]?.routes ?? []).join(', ') || '-';
 }
 
-/**
- * `/sitemap.xml` is a sitemap *index* on some sites (mastra.ai is one): its
- * <loc>s are other sitemaps, not pages. A child that cannot be read is counted,
- * not swallowed -- a page listed only there would otherwise go unseen.
- */
+/** Follows sitemap indexes (mastra.ai); unreadable children go in `failures`. */
 async function fetchSitemapLocs(url, failures, depth = 0) {
   const res = await fetchPage(url);
   if (!res.ok) throw new Error(`sitemap HTTP ${res.status}`);
@@ -501,8 +444,7 @@ export async function checkSitemapGaps(manifest) {
   _manifestCache = manifest;
   const root = new URL(manifest.docsRoot);
   const prefix = `${root.origin}${root.pathname.replace(/\/+$/, '')}/`;
-  // Trailing slashes are a rendering choice, not identity: docs.ag2.ai lists
-  // every page with one and the manifest keys carry none.
+  // docs.ag2.ai lists pages with a trailing slash; manifest keys have none.
   const canon = (u) => u.replace(/\/+$/, '');
 
   const failures = [];
@@ -520,8 +462,6 @@ export async function checkSitemapGaps(manifest) {
 
   const abs = (docPath) => canon(/^https?:\/\//.test(docPath) ? docPath : `${root.origin}${docPath}`);
 
-  // One page, several published URLs: a page listed under any of its aliases
-  // is listed.
   const aliasesOf = (docPath) => {
     const a = manifest.sitemap?.aliases?.[docPath];
     return (Array.isArray(a) ? a : a ? [a] : []).map(abs);
@@ -538,8 +478,7 @@ export async function checkSitemapGaps(manifest) {
     urlsUnderRoot: upstream.length,
     failures,
     newUnmapped: upstream.filter((u) => !covered.has(u) && !known.has(u)),
-    // Tracked but no longer listed. Alone this is a hint, not a removal --
-    // the per-page check is the other half of that verdict.
+    // A hint only; the page check decides removal.
     missingFromSitemap: tracked
       .filter((t) => !t.urls.some((u) => upstreamSet.has(u)))
       .map((t) => abs(t.docPath)),
@@ -600,7 +539,7 @@ export async function checkAllDocDrift() {
   const errors = all.filter((r) => r.error);
   const unpinned = results.filter((r) => r.status === 'unpinned');
 
-  // Anything not read is not a verdict. Listed so exit 3 always says why.
+  // Why exit 3, if it is.
   const unknownReasons = [
     ...errors.map((e) => `${e.docPath} -- ${e.error}`),
     ...(sitemap.error ? [`sitemap -- ${sitemap.error}`] : []),
@@ -669,8 +608,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log('   Nothing above is a verdict on those.');
   }
 
-  // Unpinned pages are applied by --update even when nothing drifted: that is
-  // how a page gets its first pin.
+  // Includes unpinned pages, so --update also takes first pins.
   const applicable = [...result.driftedPages, ...result.results.filter((r) => r.status === 'unpinned')];
   let wantUpdate = autoUpdate;
   if (!autoUpdate && applicable.length > 0 && process.stdin.isTTY) {

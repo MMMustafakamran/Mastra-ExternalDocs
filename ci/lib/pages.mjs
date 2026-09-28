@@ -29,7 +29,7 @@ const PAGES_CONFIG = path.join(RECORDER_DIR, 'config', 'pages.config.ts');
  * the dispatch form.
  */
 export const PAGE_GROUPS = {
-  // The guide is one page with four recorded sections; one checkbox each.
+  // One dispatch checkbox per recorded section.
   quickstart: ['quickstart'],
   tool_rendering: ['tool-rendering'],
   frontend_tools: ['frontend-tools'],
